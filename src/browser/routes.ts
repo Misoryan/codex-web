@@ -23,6 +23,7 @@ export function mapBrowserPathToInitialRoute(pathname: string, search: string) {
 }
 
 function mapBrowserPathToRoute(pathname: string): string {
+  if (pathname === "/automations") return "/automations";
   const match = pathname.match(/^\/thread\/([^/]+)$/);
   if (match) {
     try {
@@ -36,6 +37,7 @@ function mapBrowserPathToRoute(pathname: string): string {
 }
 
 export function mapMemoryPathToBrowserPath(pathname: string) {
+  if (pathname === "/automations") return { path: "/automations" };
   if (pathname === "/") {
     return { path: "/", titleChange: "Codex" };
   }

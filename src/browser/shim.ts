@@ -1,10 +1,16 @@
+import { ResumableBridge, showConnectionState } from "./resumable-bridge";
+import { installBrowserView } from "./browser-view";
+import { PersistedStateDecoder } from "../shared/persisted-state-wire";
+import { browserSystemFonts } from "./system-fonts";
 import {
   mapBrowserPathToInitialRoute,
   mapMemoryPathToBrowserPath,
 } from "./routes";
+import { referenceStatsig, type StatsigCacheHint } from "../shared/statsig-wire";
 import {
   handleLocalFilePickerMessage,
   isLocalFilePickerMessage,
+  uploadFiles,
 } from "./files";
 import {
   openSelectWorkspaceRootDialog,
@@ -48,6 +54,7 @@ type RendererToMainMessage =
     };
 
 type MainToRendererMessage =
+  | StatsigCacheHint
   | {
       type: "ipc-main-event";
       channel: string;
@@ -87,7 +94,6 @@ type MainToRendererMessage =
       portId: string;
     };
 
-const RECONNECT_DELAY_MS = 1_000;
 
 type MemoryNavigationChange = {
   action: "POP" | "PUSH" | "REPLACE";
@@ -123,15 +129,28 @@ type ElectronShimState = {
 declare global {
   interface Window {
     __ELECTRON_SHIM__?: ElectronShimState;
+    codexBrowserSystemFonts: typeof browserSystemFonts;
   }
 }
 
 declare const __CODEX_APP_VERSION__: string;
 
+function browserRandomUUID(): `${string}-${string}-${string}-${string}-${string}` {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 15) | 64;
+  bytes[8] = (bytes[8]! & 63) | 128;
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+// The native renderer calls this API directly; LAN HTTP exposes getRandomValues.
+crypto.randomUUID ??= browserRandomUUID;
+
 let requestCounter = 0;
-let socket: WebSocket | null = null;
-let needsReload = false;
-let reconnectTimeoutId: number | null = null;
+let transport: ResumableBridge | null = null;
+const liteStatsig = window.location.pathname.startsWith("/lite/");
+let statsigHash: string | null = null;
+let persistedState = new PersistedStateDecoder();
 const outboundQueue: RendererToMainMessage[] = [];
 const pendingInvokes = new Map<
   string,
@@ -150,6 +169,32 @@ const pendingDirectoryEntries = new Map<
 const rendererListeners = new Map<string, Set<IpcListener>>();
 const messagePorts = new Map<string, MessagePort>();
 
+// A standalone PWA can lose sessionStorage when the OS closes its window.
+// Web Locks keep separate live windows from sharing the saved renderer identity.
+const rendererSessionReady = (async () => {
+  const key = "codex-web-renderer-session";
+  const newId = browserRandomUUID;
+  const standalone = matchMedia("(display-mode: standalone)").matches ||
+    (navigator as Navigator & {standalone?: boolean}).standalone === true;
+  const storage = standalone ? localStorage : sessionStorage;
+  let id = storage.getItem(key) || newId();
+  if (navigator.locks) {
+    while (!(await new Promise<boolean>(resolve => {
+      void navigator.locks.request(`codex-web-renderer:${id}`, {ifAvailable: true}, lock => {
+        resolve(!!lock);
+        if (lock) return new Promise<void>(() => {});
+      });
+    }))) id = newId();
+  }
+  storage.setItem(key, id);
+  return id;
+})();
+void rendererSessionReady.then(id => {
+  transport = new ResumableBridge(id,liteStatsig ? "&statsig=1&stateDelta=1" : "",
+    handleIncomingMessage,message => liteStatsig ? referenceStatsig(message,statsigHash) : message,showConnectionState);
+  for(const message of outboundQueue.splice(0))transport.send(message);
+});
+
 function unimplemented(method: string): never {
   debugger;
   throw new Error(`[electron-stub] ${method} is not implemented`);
@@ -167,8 +212,14 @@ export function emitRendererEvent(channel: string, args: unknown[]): void {
 }
 
 function handleIncomingMessage(message: MainToRendererMessage): void {
+  message = persistedState.decode(message);
+  if (message.type === "statsig-cache-hint") {
+    statsigHash = message.hash;
+    return;
+  }
   if (message.type === "ipc-main-event") {
-    emitRendererEvent(message.channel, message.args);
+    emitRendererEvent(message.channel, message.channel === "codex_desktop:system-theme-variant-updated"
+      ? [themeMediaQuery.matches ? "dark" : "light"] : message.args);
     return;
   }
 
@@ -212,81 +263,8 @@ function handleIncomingMessage(message: MainToRendererMessage): void {
   }
 }
 
-function flushOutboundQueue(): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    return;
-  }
-  for (const message of outboundQueue.splice(0)) {
-    socket.send(JSON.stringify(message));
-  }
-}
-
-function scheduleReconnect(): void {
-  if (reconnectTimeoutId !== null) {
-    return;
-  }
-  reconnectTimeoutId = window.setTimeout(() => {
-    reconnectTimeoutId = null;
-    ensureSocket();
-  }, RECONNECT_DELAY_MS);
-}
-
-function ensureSocket(): void {
-  if (
-    socket &&
-    (socket.readyState === WebSocket.OPEN ||
-      socket.readyState === WebSocket.CONNECTING)
-  ) {
-    return;
-  }
-
-  socket = new WebSocket(
-    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/__backend/ipc`,
-  );
-  socket.addEventListener("open", () => {
-    // App-host RPC transfers MessagePorts once at startup. A new connection needs
-    // a fresh app view; replaying requests against the closed ports cannot recover it.
-    if (needsReload) {
-      window.location.reload();
-      return;
-    }
-    flushOutboundQueue();
-  });
-  socket.addEventListener("message", (event) => {
-    try {
-      const message = JSON.parse(String(event.data)) as MainToRendererMessage;
-      handleIncomingMessage(message);
-    } catch (error) {
-      console.error(
-        "[electron-stub] failed to parse IPC bridge message",
-        error,
-      );
-    }
-  });
-  socket.addEventListener("close", () => {
-    needsReload = true;
-    const error = new Error("Connection to Codex was lost");
-    for (const pending of pendingInvokes.values()) pending.reject(error);
-    pendingInvokes.clear();
-    for (const pending of pendingDirectoryEntries.values())
-      pending.reject(error);
-    pendingDirectoryEntries.clear();
-    outboundQueue.length = 0;
-    for (const port of messagePorts.values()) {
-      port.close();
-    }
-    messagePorts.clear();
-    scheduleReconnect();
-  });
-  socket.addEventListener("error", () => {
-    scheduleReconnect();
-  });
-}
-
 function enqueueMessage(message: RendererToMainMessage): void {
-  outboundQueue.push(message);
-  ensureSocket();
-  flushOutboundQueue();
+  if(transport)transport.send(message);else outboundQueue.push(message);
 }
 
 function nextRequestId(): string {
@@ -318,7 +296,9 @@ function shouldCloseSidebarForMemoryPath(path: string): boolean {
     path === "/" ||
     path.startsWith("/local/") ||
     path === "/skills" ||
-    path === "/automations"
+    path === "/automations" ||
+    path === "/settings" ||
+    path.startsWith("/settings/")
   );
 }
 
@@ -364,10 +344,19 @@ function requestWorkspaceDirectoryEntries(
 }
 
 const themeMediaQuery = matchMedia("(prefers-color-scheme: dark)");
+themeMediaQuery.addEventListener("change", () => {
+  emitRendererEvent("codex_desktop:system-theme-variant-updated", [themeMediaQuery.matches ? "dark" : "light"]);
+});
 const mobileMediaQuery = matchMedia("(max-width: 768px)");
 const initialSidebarState = !mobileMediaQuery.matches;
 const electronShim = (window.__ELECTRON_SHIM__ ??= {});
 const buildFlavor: "prod" | "dev" | "agent" | string = "prod";
+window.codexBrowserSystemFonts = browserSystemFonts;
+Object.assign(window, {codexBrowserAppInfo: {
+  version: __CODEX_APP_VERSION__, buildNumber: null, buildFlavor,
+  osName: null, systemVersion: null, appName: "Codex",
+  appIconMedium: null, dockIconPreviews: null, preloadAttribution: null,
+}});
 
 Object.assign(globalThis, {
   process: {
@@ -441,8 +430,13 @@ electronShim.onMemoryNavigationChanged = (navigation) => {
 export const ipcRenderer = {
   invoke(channel: string, ...args: unknown[]): Promise<unknown> {
     if (channel === "codex_desktop:message-from-view" && args.length === 1) {
+      const message = args[0];
+      if (isRecord(message) && message.type === "browser-sidebar-sync" && isRecord(message.payload)) {
+        args[0] = { ...message, payload: { ...message.payload, annotationModeEnabled: false } };
+      }
       if (isOpenInBrowserMessage(args[0])) {
         window.open(args[0].url, "_blank", "noopener,noreferrer");
+        return Promise.resolve();
       }
 
       if (isLocalFilePickerMessage(args[0])) {
@@ -450,6 +444,7 @@ export const ipcRenderer = {
       }
 
       if (isUnhandledAddWorkspaceRootOptionMessage(args[0])) {
+        const message = args[0];
         return openSelectWorkspaceRootDialog({
           listDirectory: requestWorkspaceDirectoryEntries,
         }).then((root) => {
@@ -457,7 +452,7 @@ export const ipcRenderer = {
             return undefined;
           }
 
-          return invokeMain(channel, [{ ...args[0], root }]);
+          return invokeMain(channel, [{ ...message, root }]);
         });
       }
     }
@@ -586,16 +581,20 @@ export const ipcRenderer = {
   },
 };
 
-ensureSocket();
-
 export const contextBridge = {
   exposeInMainWorld(_key: string, _api: unknown): void {
+    // Browser menus render in the page; the Electron popup cannot reach this client.
+    if (_key === "electronBridge" && isRecord(_api)) {
+      delete _api.showContextMenu;
+      _api.uploadFiles = uploadFiles;
+      installBrowserView((channel, ...args) => ipcRenderer.invoke(channel, ...args));
+    }
     Reflect.set(window, _key, _api);
   },
 };
 
 export const webUtils = {
   getPathForFile(_file: File): string | null {
-    return unimplemented("webUtils.getPathForFile");
+    return null;
   },
 };

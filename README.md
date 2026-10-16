@@ -1,146 +1,69 @@
-# codex-web
+# Codex Web
 
-a browser frontend for codex desktop, running on a machine you control.
+A self-hosted browser bridge for Codex Desktop, with Full/Lite interfaces, mobile PWA support and resumable sessions.
 
-https://github.com/user-attachments/assets/0a33cbd8-741c-412c-9e75-46dfe9324596
+基于 [0xcaff/codex-web](https://github.com/0xcaff/codex-web) 的维护分支。后端运行在自己的电脑上，可通过浏览器访问 Desktop 界面。当前 Desktop 版本锁定为 `26.1007.30912`。
 
-## motivation
+## 本分支的功能
 
-the agents were never meant to stay trapped in a terminal window for long.
-codex desktop brought the power of agents to your local computer, where your
-files, credentials, and tools already live.
+- Full 和 Lite 两种界面；Lite 减少非会话初始化工作。
+- 手机 PWA、侧栏与工具面板布局、上传与图片预览。
+- WebSocket 断线续接、命令去重、独立标签页与会话生命周期管理。
+- 历史分页、已回答问题状态、子代理历史与标题、发送后草稿处理。
+- 浏览器面板、可视化沙箱、可选 Sub2API 用量面板。
+- Windows 启停脚本，以及源码和 Git 历史的发布前隐私检查。
 
-codex-web brings codex desktop to the browser while keeping the backend on a
-machine you control (a linux box in the cloud, your home lab, or a desktop / mac
-mini). agents keep running after your laptop closes. you can reconnect from any
-device with a browser.
+公开仓库只包含项目源码、补丁和通用文档。构建时从官方地址下载 Desktop 归档并在本机应用补丁。
 
-this project aims to be as thin a wrapper as possible to ensure upstream changes
-to the codex desktop app can be integrated quickly.
+## 安装与运行
 
-## usage
+需要 Node.js 22.12 以上、Git、curl，以及已登录的 Codex CLI。浏览器面板和浏览器验收使用 Chrome/Chromium。
 
-`codex-web` serves the browser client and hosts the desktop-side bridge. by
-default, it listens on `127.0.0.1:8214`.
-
-it will use `codex` from `PATH` if available, or `CODEX_CLI_PATH` if you set
-it.
-
-run it with `npx`:
-
-```bash
-npx --yes github:0xcaff/codex-web
-```
-
-or with nix:
-
-```bash
-nix run github:0xcaff/codex-web
-```
-
-then open <http://127.0.0.1:8214> in a browser.
-
-### sign in
-
-ensure the codex cli on the host machine is signed in before starting the
-server.
-
-```bash
+```sh
+git clone https://github.com/Misoryan/codex-web.git
+cd codex-web
+npm ci
+npm run build
 codex login --device-auth
+npm run server -- --host 127.0.0.1 --port 8214
 ```
 
-### proxying to app-server (advanced usage)
+打开 [Full](http://127.0.0.1:8214/) 或 [Lite](http://127.0.0.1:8214/lite/)。`CODEX_CLI_PATH` 可以指定 Codex CLI 的可执行文件；否则使用 `PATH` 中的 `codex`。
 
-it’s often useful to run the app server separately, so a crash or restart of
-codex-web doesn’t interrupt the codex process executing commands.
+Windows 后台运行：
 
-it's possible to hook codex-web up to an already-running app server using the
-`codex_remote_proxy` script.
-
-start a long-lived app server somewhere:
-
-```bash
-mkdir -p /tmp/codex-app-server
-cd /tmp/codex-app-server
-codex app-server --listen unix://codex-app-server.sock
+```powershell
+./start.ps1 -Port 8214
+./stop.ps1
 ```
 
-then run `codex-web` with the proxy helper:
+构建归档缓存在 `runtime/cache/`，每次准备时校验 SHA-256。已有归档可以通过 `HOSTED_CODEX_APP_ZIP` 指定。`npm ci` 只安装依赖；`npm run build` 会重建 `scratch/`，不要在那里保存自己的文件。
 
-```bash
-nix shell github:0xcaff/codex-web github:0xcaff/codex-web#codex_remote_proxy -c bash -lc '
-  export CODEX_UNIX_SOCKET=/tmp/codex-app-server/codex-app-server.sock
-  export CODEX_CLI_PATH="$(command -v codex_remote_proxy)"
-  codex-web
-'
+## 验证
+
+```sh
+npm run build:server
+npm test
+npm run test:desktop
 ```
 
-`codex app-server proxy --sock ...` is a raw stdio protocol bridge for another
-program to use; when run directly in a terminal it will wait for protocol input
-rather than opening an interactive prompt.
+`npm test` 验证服务端续接、配置缓存、用量接口和隔离的浏览器连接。`test:desktop` 需要已完成 Full/Lite 构建，验证实际补丁后的历史、问题状态和 PWA 资源行为。测试使用独立 fixture，不连接现有服务。
 
-## security
+安装 [Gitleaks](https://github.com/gitleaks/gitleaks) 后执行隐私检查：
 
-run `codex-web` only on trusted networks. treat anyone who can reach the
-`codex-web` server as someone who can operate codex on the host machine as the
-same user running the server.
+```sh
+npm run audit:privacy -- --history
+npm run hooks:install
+```
 
-if you need authn or authz, implement it outside of `codex-web`: proxy it through
-wireguard, tailscale, or an ssh tunnel and put an authentication gateway or
-reverse proxy in front.
+GitHub CI 检查隐私，并在 Windows 与 Linux 上构建、运行验收。初次公开版本的审核范围和限制见 [公开前审查](docs/publication-review.md)。
 
-someone with access to the web ui may be able to:
+## 维护
 
-- run commands on the host, limited only by the permissions of the `codex-web`
-  server process.
-- read or modify files, environment variables, credentials, ssh keys, and other
-  local resources that are accessible to that process.
-- use the codex / chatgpt account already signed in on the host. this may
-  consume usage quota or billing credits, and may expose account metadata shown
-  by the app or cli, such as name or email address.
+后续定制和上游同步流程见 [维护与更新](docs/maintenance.md)。Desktop 版本升级见 [UPGRADING.md](UPGRADING.md)，运行参数和可选统计功能见 [配置](docs/configuration.md)。
 
-## features
+## 安全与许可
 
-- hostable on macOS, Linux (and anything codex cli + node will run on)
-- reachable from the browser
-- thin wrapper, so updates should land fast
-- working today:
-  - subagents
-  - inline images
-  - editor sidepanel
-  - transcription
+服务能以宿主进程的权限运行命令和访问文件。远程访问需要可信网络或带认证的代理，同时保护 WebSocket 路由；详见 [SECURITY.md](SECURITY.md)。
 
-## roadmap
-
-some parts of the desktop experience are not wired up yet:
-
-- browser panel support, likely rebuilt around iframes
-- computer use on linux, which could become a very powerful feature
-- terminal support
-- git worker integration
-- whatever else people find and file issues for
-
-## issues welcome
-
-if something is broken, missing, or rough around the edges, please file an
-issue.
-
-using `codex-web` in an interesting way? post about it on x and tag me
-[@0xcaff](https://x.com/0xcaff).
-
-using this at a company and need something more tailored? email me and we can
-talk.
-
-## alternatives
-
-* [davej/pocodex](https://github.com/davej/pocodex) i used this until the wheels fell off. i needed subagents
-  and an inline image viewer. this didn't have them and was having a hard time
-  keeping up with upstream codex updates.
-* the native codex remote feature (behind a feature flag) is great for
-  connecting to remote codex hosts over ssh to manage long running tasks but
-  this only works if you have codex desktop on your client device. this means it
-  doesn't work on mobile.
-* upcoming first party mobile app from openai. `codex-web` exists and works
-  today. i can't wait for the mobile app but judging by the other openai mobile
-  apps, i'm a little bit skeptical about the quality of the mobile experience.
-  time will tell.
+项目代码沿用上游声明的 MIT 许可，保留上游历史和署名。Codex Desktop、提取后的应用和第三方资源受各自条款约束，详见 [NOTICE](NOTICE)。本项目由社区维护。

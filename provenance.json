@@ -1,0 +1,6 @@
+{
+  "upstream": "https://github.com/0xcaff/codex-web",
+  "upstreamCommit": "2424e8548db3eebeb49eef5057ef750688bb680b",
+  "importedAt": "2026-10-16",
+  "description": "Source-only import of the maintained Full/Lite Windows deployment. Local deployment history and user data are excluded."
+}

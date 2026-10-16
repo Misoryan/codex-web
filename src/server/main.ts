@@ -17,6 +17,14 @@ import Fastify from "fastify";
 import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { installModuleAliasHook } from "./module";
+import { hideBackgroundProcessWindows } from "./background-processes";
+import { createBrowserStreamUpgrade } from "./browser-stream";
+import { synchronizeGlobalState } from "./global-state-sync";
+import { RendererSessions } from "./renderer-sessions";
+import { StatsigCache } from "./statsig-cache";
+import { PersistedStateEncoder } from "../shared/persisted-state-wire";
+import { registerSub2ApiUsage } from "./sub2api-usage";
+import { MonitoringDestination, ServerMonitoring, installHttpMonitoring, requestFields, errorFields, identity } from "./observability";
 
 type ServerOptions = {
   host: string;
@@ -238,6 +246,8 @@ type RendererWindow = {
 };
 
 type IpcMainBridgeState = {
+  synchronizeGlobalState?: (store: Parameters<typeof synchronizeGlobalState>[0], write: (state: Map<string, unknown>) => void) => void;
+  onGlobalStateChanged?: (keys: string[]) => void;
   setRendererWindowFactory?: (factory: () => Promise<RendererWindow>) => void;
   sendToRenderer?: (
     webContentsId: number,
@@ -409,10 +419,52 @@ function ensureElectronLikeProcessContext(): void {
   processWithElectronFields.type ??= "browser";
 }
 
-async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
+export async function createBridgeServer(logDirectory = path.resolve(__dirname, "../../runtime/monitoring")) {
   const bridgeState = getIpcMainBridgeState();
-  const app = Fastify({ logger: false });
-  const websocketServer = new WebSocketServer({ noServer: true });
+  bridgeState.synchronizeGlobalState = (store, write) => {
+    synchronizeGlobalState(store, write, keys => bridgeState.onGlobalStateChanged?.(keys));
+  };
+  const destination = new MonitoringDestination(logDirectory);
+  const app = Fastify({
+    logger: { stream: destination, base: { pid: process.pid },
+      timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
+      redact: { paths: ["msg"], censor: "redacted" },
+      serializers: { req: () => ({}), res: () => ({}), err: error => ({ type: "Error", message: "redacted", stack: "", ...errorFields(error) }) } },
+    disableRequestLogging: true, genReqId: () => randomUUID(),
+  });
+  const monitoring = new ServerMonitoring(app.log);
+  installHttpMonitoring(app, monitoring);
+  app.addHook("onClose", async () => { monitoring.event("server.stop"); await destination.close(); });
+  app.get("/__backend/health", async () => ({ ok: true, runId: monitoring.runId, droppedLogRecords: destination.droppedRecords }));
+  app.post("/__backend/telemetry", {
+    bodyLimit: 4096,
+    schema: { body: { type: "object", additionalProperties: false, required: ["event", "visit"], properties: {
+      event: { type: "string", enum: ["visit", "open", "ready", "close", "error", "online", "offline", "visible", "hidden", "pagehide", "resource_error", "js_error"] },
+      visit: { type: "string", format: "uuid" }, session: { type: "string", format: "uuid" }, document: { type: "string", format: "uuid" },
+      build: { type: "string", pattern: "^[a-f0-9]{12}$" }, mode: { type: "string", enum: ["full", "lite"] },
+      standalone: { type: "boolean" }, online: { type: "boolean" }, visible: { type: "boolean" },
+      elapsedMs: { type: "integer", minimum: 0, maximum: 2147483647 }, durationMs: { type: "integer", minimum: 0, maximum: 2147483647 },
+      code: { type: "integer", minimum: 0, maximum: 4999 }, attempt: { type: "integer", minimum: 0, maximum: 1000000 },
+    } } },
+  }, async (request, reply) => {
+    const body = request.body as Record<string, any>;
+    const { event, visit, session, document, ...measurements } = body;
+    monitoring.event(`client.${event}`, { ...requestFields(request.raw), ...measurements, visit: identity(visit), session: identity(session), document: identity(document) });
+    return reply.code(204).send();
+  });
+  await registerSub2ApiUsage(app);
+  const websocketServer = new WebSocketServer({
+    noServer: true,
+    // Desktop sends multi-megabyte feature snapshots at startup. Use the
+    // standard WebSocket extension rather than changing message semantics.
+    perMessageDeflate: {
+      threshold: 1024,
+      serverNoContextTakeover: true,
+      clientNoContextTakeover: true,
+      concurrencyLimit: 2,
+      zlibDeflateOptions: { level: 3 },
+    },
+  });
 
   await app.register(fastifyMultipart, {
     limits: {
@@ -465,22 +517,32 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     return reply.sendFile("index.html");
   });
 
+  app.get('/lite', async (_request, reply) => reply.redirect('/lite/'));
+  app.get('/lite/', async (_request, reply) => reply.sendFile('lite/index.html'));
+
   app.setNotFoundHandler((request, reply) => {
-    if (request.url.startsWith("/@fs/")) {
+    if (request.url.startsWith("/@fs/") || request.url.startsWith("/assets/") || request.url.startsWith("/lite/assets/")) {
       return reply.code(404).send({ error: "Not Found" });
     }
 
     if (request.method === "GET") {
+      if(request.url.startsWith('/lite/')) return reply.sendFile('lite/index.html');
       return reply.sendFile("index.html");
     }
     return reply.code(404).send({ error: "Not Found" });
   });
 
+  const browserStreamUpgrade = createBrowserStreamUpgrade(monitoring);
   app.server.on("upgrade", (request, socket, head) => {
     const requestUrl = request.url ?? "/";
     const host = request.headers.host ?? "localhost";
     const url = new URL(requestUrl, `http://${host}`);
+    if (url.pathname === "/__backend/browser-stream") {
+      browserStreamUpgrade(request, socket, head);
+      return;
+    }
     if (url.pathname !== "/__backend/ipc") {
+      monitoring.event("ws.rejected", { ...requestFields(request), reason: "unknown_route" });
       socket.destroy();
       return;
     }
@@ -490,41 +552,71 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
     });
   });
 
-  const rendererSockets = new Map<number, WebSocket>();
+  const rendererChannels = new Map<number, (message: MainToRendererMessage) => void>();
   const rendererWindowFactory = new Promise<() => Promise<RendererWindow>>(
-    (resolve) => {
-      bridgeState.setRendererWindowFactory = resolve;
-    },
-  );
-  bridgeState.sendToRenderer = (webContentsId, message): void => {
-    const socket = rendererSockets.get(webContentsId);
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(message));
+    resolve => { bridgeState.setRendererWindowFactory = resolve; });
+  bridgeState.sendToRenderer = (id, message) => rendererChannels.get(id)?.(message);
+  type View = { window: RendererWindow; ports: Map<string, WebSocketMessagePort>;
+    encoder: PersistedStateEncoder; send: (message: MainToRendererMessage) => void };
+  const rendererSessions = new RendererSessions<View>(async () => ({
+    window: await (await rendererWindowFactory)(), ports: new Map(),
+    encoder: new PersistedStateEncoder(), send: () => {},
+  }), view => {
+    rendererChannels.delete(view.window.webContents.id);
+    for (const port of [...view.ports.values()]) port.disconnect();
+    view.window.destroy();
+  }, undefined, (event, id, document, fields) => monitoring.event(`session.${event}`, { session: identity(id), document: identity(document), ...fields }));
+  const statsigCache = new StatsigCache();
+  websocketServer.on("connection", (socket, request) => {
+    const trace = monitoring.connection("ipc", socket, request);
+    socket.on("error", () => socket.terminate());
+    const params = new URL(request.url!, "http://localhost").searchParams;
+    const reset = (reason: string) => {
+      trace.event("rejected", { reason });
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type:"renderer-reset",reason}));
+      socket.close(4001, "Renderer reset required");
+    };
+    if (params.get("lifecycle") !== "3") { reset("页面版本已更新，请重新加载"); return; }
+    const sessionId=params.get("session"), documentId=params.get("document");
+    if (!sessionId || !documentId || !/^[0-9a-f-]{36}$/.test(sessionId) || !/^[0-9a-f-]{36}$/.test(documentId)) {
+      reset("页面身份无效"); return;
     }
-  };
-
-  websocketServer.on("connection", (socket) => {
+    const statsig=params.get("statsig")==="1"?statsigCache.connect():null;
+    if(statsig) socket.send(JSON.stringify(statsig.hint));
+    const sendFrame=(frame:unknown)=>{
+      if(socket.readyState!==WebSocket.OPEN)return;
+      socket.send(JSON.stringify(frame));
+    };
+    let lease: ReturnType<typeof rendererSessions.attach>;
+    try {
+      lease=rendererSessions.attach(sessionId,documentId,params.get("epoch"),Number(params.get("ack")||0),socket,
+        {send:sendFrame,close:()=>socket.close(4001,"Renderer connection replaced")});
+    } catch(error) { statsig?.close(); reset(String(error));return; }
+    trace.event("attached", { reused: lease.reused });
+    let alive=true;
+    const heartbeat=setInterval(()=>{if(!alive){trace.event("heartbeat_timeout");socket.terminate();return;}alive=false;socket.ping();},30_000);
+    heartbeat.unref();
+    // No short visibility deadline: a hidden/frozen document is recoverable.
+    socket.on("pong",()=>{alive=true});
+    socket.once("close",(code,reason)=>{
+      clearInterval(heartbeat);statsig?.close();
+      if(code===1000 && reason.toString()==="Document closed")lease.expire("页面已关闭");
+      else lease.release();
+    });
     let rendererWindow: RendererWindow | undefined;
-    // Each tab is a real registered app view, with its own IPC client and ownership.
-    const rendererReady = rendererWindowFactory
-      .then(async (createWindow) => {
-        if (socket.readyState !== WebSocket.OPEN) return undefined;
-        const window = await createWindow();
-        if (socket.readyState !== WebSocket.OPEN) {
-          window.destroy();
-          return undefined;
-        }
-        rendererWindow = window;
-        rendererSockets.set(window.webContents.id, socket);
-        return window;
-      })
-      .catch((error) => {
-        console.error("[ipc-bridge] failed to create renderer window", error);
-        socket.close(1011, "Renderer initialization failed");
-        return undefined;
-      });
+    let messagePorts: Map<string,WebSocketMessagePort>;
+    let send: (message: MainToRendererMessage) => void;
+    const rendererReady=lease.window.then(view=>{
+      if(!lease.isCurrent())return undefined;
+      rendererWindow=view.window;messagePorts=view.ports;
+      view.send=message=>lease.send(params.get("stateDelta")==="1"?view.encoder.encode(message):message);
+      send=view.send;
+      rendererChannels.set(view.window.webContents.id,view.send);
+      console.info("[renderer-session] attached",{windowId:view.window.id,reused:lease.reused});
+      if(socket.readyState===WebSocket.OPEN) { lease.ready(); trace.event("ready", { reused: lease.reused }); }
+      return view;
+    }).catch(error=>{trace.event("renderer_error", errorFields(error));lease.expire("页面初始化失败");console.error("[ipc-bridge] renderer creation failed",error);return undefined;});
 
-    const messagePorts = new Map<string, WebSocketMessagePort>();
     const dispatchPostMessage = (
       channel: string,
       message: unknown,
@@ -545,28 +637,8 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       }
     };
 
-    socket.on("close", () => {
-      for (const port of messagePorts.values()) {
-        port.disconnect();
-      }
-      messagePorts.clear();
-      if (rendererWindow) {
-        rendererSockets.delete(rendererWindow.webContents.id);
-        rendererWindow.destroy();
-      }
-    });
-
-    socket.on("message", async (rawData) => {
-      const window = await rendererReady;
-      if (!window || socket.readyState !== WebSocket.OPEN) return;
-      let message: RendererToMainMessage;
-      try {
-        message = JSON.parse(String(rawData)) as RendererToMainMessage;
-      } catch (error) {
-        console.error("[ipc-bridge] invalid JSON payload", error);
-        return;
-      }
-
+    const dispatchMessage = (message: RendererToMainMessage): void => {
+      const window = rendererWindow!;
       if (message.type === "ipc-renderer-send") {
         bridgeState.handleRendererSend?.(
           message.channel,
@@ -590,9 +662,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
           const port = new WebSocketMessagePort(
             portId,
             (message) => {
-              if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify(message));
-              }
+              send(message);
             },
             () => messagePorts.delete(portId),
           );
@@ -615,34 +685,35 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
       }
 
       if (message.type === "workspace-directory-entries-request") {
+        const started = performance.now();
         const { requestId } = message;
         getWorkspaceDirectoryEntries(message)
           .then((result) => {
+            const durationMs = Math.round(performance.now() - started);
+            if (durationMs > 1000) trace.event("handler_slow", { operation: "directory_entries", durationMs });
             const payload: MainToRendererMessage = {
               type: "workspace-directory-entries-result",
               requestId,
               ok: true,
               result,
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            send(payload);
           })
           .catch((error) => {
+            trace.event("handler_error", { operation: "directory_entries", durationMs: Math.round(performance.now() - started), ...errorFields(error) });
             const payload: MainToRendererMessage = {
               type: "workspace-directory-entries-result",
               requestId,
               ok: false,
               errorMessage: errorMessage(error),
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            send(payload);
           });
         return;
       }
 
       if (message.type === "ipc-renderer-invoke") {
+        const started = performance.now();
         const { channel, requestId, args } = message;
         Promise.resolve(
           bridgeState.handleRendererInvoke?.(channel, args, window.id) ??
@@ -653,31 +724,48 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
             ),
         )
           .then((result) => {
+            const durationMs = Math.round(performance.now() - started);
+            if (durationMs > 1000) trace.event("handler_slow", { operation: "invoke", durationMs });
             const payload: MainToRendererMessage = {
               type: "ipc-renderer-invoke-result",
               requestId,
               ok: true,
               result,
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            send(payload);
           })
           .catch((error) => {
+            trace.event("handler_error", { operation: "invoke", durationMs: Math.round(performance.now() - started), ...errorFields(error) });
             const payload: MainToRendererMessage = {
               type: "ipc-renderer-invoke-result",
               requestId,
               ok: false,
               errorMessage: errorMessage(error),
             };
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify(payload));
-            }
+            send(payload);
           });
       }
+    };
+    socket.on("message",async raw=>{
+      const receivedAt = performance.now();
+      const view=await rendererReady;
+      if(!view||!lease.isCurrent()||socket.readyState!==WebSocket.OPEN)return;
+      try {
+        const frame=JSON.parse(String(raw));
+        if(frame.type==="renderer-ping"){sendFrame({type:"renderer-pong",id:frame.id});const durationMs=Math.round(performance.now()-receivedAt);if(durationMs>1000)trace.event("ping_delayed",{durationMs});return;}
+        if(frame.type==="renderer-ack"){lease.acknowledge(frame.seq);return;}
+        if(frame.type!=="renderer-command")throw Error("Invalid renderer frame");
+        const message=(statsig?statsig.expand(frame.payload):frame.payload) as RendererToMainMessage;
+        lease.accept(frame.seq,()=>dispatchMessage(message));
+      } catch(error) {trace.event("invalid_frame",errorFields(error));lease.expire("通信状态异常，请重新加载");console.warn("[ipc-bridge] invalid renderer frame",errorFields(error));}
     });
   });
 
+  return app;
+}
+
+async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
+  const app = await createBridgeServer();
   await app.listen({ host: options.host, port: options.port });
   console.log(`IPC bridge listening at ws://${options.host}:${options.port}`);
 
@@ -700,9 +788,10 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
 }
 
 async function main(args: string[]) {
+  hideBackgroundProcessWindows();
   const options = parseServerArgs(args);
 
   await startIpcBridgeServer(options);
 }
 
-main(process.argv.slice(2));
+if (require.main === module) main(process.argv.slice(2)).catch(error => { console.error(error); process.exitCode = 1; });

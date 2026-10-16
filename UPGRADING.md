@@ -1,99 +1,32 @@
-# upgrading
+# Desktop 版本升级
 
-instructions for upgrading codex-web to point at a new version of upstream
-Codex Desktop.
+版本和归档校验值集中保存在 `desktop.json`。`scripts/prepare-desktop.mjs` 与 Nix 构建读取同一份版本信息。
 
-## backing up
+先建立升级分支或独立 checkout，保存当前可部署版本。下载新的官方归档，独立核对 SHA-256 后更新 `desktop.json`。不要在现有服务的 `scratch/` 目录上尝试升级。
 
-we will start by generating a scratch directory and backing it up. first, let's
-get the `scratch` directory to a known state by running the following
+## 补丁适配
 
-```bash
-rm -rf scratch scratch-backup # remove existing past scratch directories to start from clean state
-DEV=1 nix develop --command yarn run prepare:asar 
-mv scratch scratch-backup
+新的 Desktop 可能改变 bundle 文件名、压缩符号和原生组件结构。需要检查：
+
+1. `patches/` 的上下文与目标文件。
+2. `scripts/patch-webview.mjs` 的入口列表和各功能补丁的锚点。
+3. `scripts/lite-startup-patches.mjs` 中 Lite 禁用的原生初始化任务。
+4. preload 桥、app-host 通信和 CLI 协议版本。
+
+补丁锚点不匹配时构建会失败。应重新定位当前版本的组件，更新补丁与现有验收，不保留旧版本的兼容分支。
+
+从未修改的归档重新运行 `npm run build`，避免把上一次手动修改的提取文件当作源码。对原生补丁使用实际 diff，保留原项目与第三方版权说明。
+
+## 验收与部署
+
+```sh
+npm ci
+npm run build
+npm test
+npm run test:desktop
+npm run audit:privacy -- --history
 ```
 
-the `scratch-backup` directory holds the patched, working version of codex-web.
-we will use this when moving the patches over to the new version to understand
-the context the patches were being applied in.
+浏览器验收使用独立 fixture。还需要在隔离测试用户目录中检查 Full/Lite 加载、会话切换、发送草稿、断线续接、工具面板与移动端布局。涉及 CLI 时先核对 Desktop 所需协议版本和完整的 CLI 辅助程序。
 
-## updating urls
-
-there are a few places to update next.
-
-1. `appVersion` in default.nix and `hash` in `codexZip`.
-2. `APP_VERSION` in ./scripts/prepare
-
-then temporarily comment out the patch lines in ./scripts/prepare_asar and run
-
-```bash
-DEV=1 nix develop --command yarn run prepare:asar 
-cp -r scratch scratch-new-version-unmodified
-```
-
-## upgrading the codex-cli version
-
-this part can be run concurrently with the rest of the upgrade process. make
-sure to wait for its completion before doing validation. run it in a subagent.
-
-run the following to get the version of the new codex-cli
-
-```bash
-scratch/ChatGPT.app/Contents/Resources/codex-cli/bin/codex --version
-```
-
-then update the `nix/codex/default.nix` file's `version` field and hashes to
-point to the new version.
-
-## porting over patches
-
-now we have a few folders
-
-* `scratch-backup`: patches applied on top of old version of Codex Desktop
-* `scratch-new-version-unmodified`: plain extracted new version of Codex Desktop
-* `scratch`: working copy we will be modifying
-
-now carefully look at the patches in `patches/` and how they were applied in
-`scratch-backup` and bring the changes over to `scratch`. apply them directly
-in-tree first. don't worry immediately about updating the patches yet.
-
-## updating patches
-
-once the patches have been made in `scratch`, diff the changes in `scratch`
-against `scratch-new-version-unmodified` and update the patches in `patches/`.
-always generate the patches by running `diff` and always avoid writing the
-patches manually as it's very easy to get them wrong.
-
-once that is done, uncomment the patch lines in `scripts/prepare_asar` and run
-
-```bash
-mv scratch scratch-patched-inplace
-rm -rf scratch
-DEV=1 nix develop --command yarn run prepare:asar 
-```
-
-then diff `./scratch-patched-inplace` with the resulting `./scratch` to validate
-the patches were applied as expected.
-
-## validation
-
-to validate things are still working, we'll first validate the server, then the
-client. before starting this step, make sure to wait for the
-`upgrading the codex-cli version` subagent to finish.
-
-to validate the server, run the following
-
-```bash
-nix develop --command yarn server
-```
-
-next validate the client by opening a browser window to `http://localhost:8214`
-and validating things show up on the page.
-
-look in the console for errors. also, look on the screen to see whether any
-error dialogs popped up. sometimes errors occur, but they're silent and exhibit
-as loading taking forever (more than 1m). look out for that case too.
-
-if there are errors, bring them to the users attention and we will decide how to
-proceed.
+部署前保留当前版本、源码提交号和资源哈希。静态文件与后端分别验收；真实手机表现需要实机确认，浏览器设备模拟只作为补充。

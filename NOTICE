@@ -1,0 +1,9 @@
+This repository is a fork of https://github.com/0xcaff/codex-web.
+The upstream package declares the MIT license in package.json. Its source
+history and author attribution are preserved.
+
+Codex Desktop, its extracted application code, icons, bundled browser runtime,
+and associated product names belong to their respective owners. They are not
+included in this repository or covered by this repository's MIT license.
+The build downloads the pinned official archive and applies patches locally.
+This is an independent project and is not an official OpenAI product.

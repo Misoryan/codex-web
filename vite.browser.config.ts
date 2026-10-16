@@ -43,6 +43,8 @@ export default defineConfig({
   resolve: {
     alias: {
       electron: path.resolve(configDir, "src/browser/shim.ts"),
+      "../shared/persisted-state-wire": path.resolve(configDir, "src/shared/persisted-state-wire.ts"),
+      "../shared/statsig-wire": path.resolve(configDir, "src/shared/statsig-wire.ts"),
     },
   },
   build: {

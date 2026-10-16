@@ -1,3 +1,8 @@
+import os from "node:os";
+import { debuglog } from "node:util";
+import { browserGuests } from "../browser-guest";
+import { installBrowserGuestIpc } from "../browser-stream";
+
 type StubFunction = (...args: unknown[]) => unknown;
 type StubListener = (...args: unknown[]) => void;
 type StubMessagePort = {
@@ -68,8 +73,11 @@ function getIpcMainBridgeState(): IpcMainBridgeState {
   return globals.__codexElectronIpcBridge;
 }
 
+// NODE_DEBUG=codex-web-electron enables explicit bridge diagnostics. Keep normal
+// streaming traffic out of stdout, including its potentially large payloads.
+const bridgeDebug = debuglog("codex-web-electron");
 function log(method: string, args: unknown[]): void {
-  console.log(`[electron-main-stub] ${method}`, args);
+  bridgeDebug("%s %O", method, args);
 }
 
 function createDeepStub(pathLabel: string): StubFunction {
@@ -315,6 +323,9 @@ const appBase = {
   getAppMetrics(): unknown[] {
     log("app.getAppMetrics", []);
     return [];
+  },
+  getGPUFeatureStatus(): { gpu_compositing: string } {
+    return { gpu_compositing: "disabled_software" };
   },
   getAppPath(): string {
     log("app.getAppPath", []);
@@ -614,6 +625,12 @@ class BrowserWindow {
   getNormalBounds(): { height: number; width: number; x: number; y: number } {
     return this.getBounds();
   }
+  getContentBounds(): { height: number; width: number; x: number; y: number } {
+    return this.getBounds();
+  }
+  setContentBounds(bounds: {height?: number; width?: number; x?: number; y?: number}): void {
+    this.setBounds(bounds);
+  }
 
   setBounds(nextBounds: {
     height?: number;
@@ -785,9 +802,9 @@ const crashReporter = {
 
 const net = {
   isOnline(): boolean {
-    // There is no Chromium network monitor in the headless host. Let transports
-    // attempt reconnects and determine connectivity from their own results.
-    return true;
+    return Object.values(os.networkInterfaces()).some(addresses =>
+      addresses?.some(address => !address.internal),
+    );
   },
   async fetch(input: string | URL, init?: RequestInit): Promise<Response> {
     // log("net.fetch", [input, init]);
@@ -823,6 +840,7 @@ const net = {
 
 const autoUpdater = createEmitterStub("autoUpdater");
 const ipcMain = createIpcMainStub();
+installBrowserGuestIpc(ipcMain);
 const nativeTheme = {
   ...createEmitterStub("nativeTheme"),
   shouldUseDarkColors: false,
@@ -1058,7 +1076,7 @@ const utilityProcess = {
 const webContents = {
   fromId(id: number): Record<string, unknown> | undefined {
     log("webContents.fromId", [id]);
-    return BrowserWindow.getAllWindows().find(
+    return browserGuests.get(id) as unknown as Record<string, unknown> ?? BrowserWindow.getAllWindows().find(
       (window) => window.webContents.id === id,
     )?.webContents;
   },

@@ -83,7 +83,9 @@ function openBrowserFilePicker({
   });
 }
 
-async function uploadFiles(files: File[]) {
+export async function uploadFiles(files: File[]): Promise<
+  { label: string; path: string; fsPath: string }[]
+> {
   if (files.length === 0) {
     return [];
   }

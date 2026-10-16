@@ -1,0 +1,50 @@
+const assert = require('node:assert/strict');
+const {performance} = require('node:perf_hooks');
+const {StatsigCache} = require('../src/server/statsig-cache.js');
+const {referenceStatsig} = require('../src/shared/statsig-wire.js');
+const message = (account='a',extra={}) => ({type:'ipc-renderer-invoke',requestId:'config',channel:'codex_desktop:message-from-view',args:[{
+ type:'shared-object-set',key:'statsig_evaluations',value:{userId:'u',accountId:account,authMethod:'chatgpt',stableId:'s',sdkKey:'test',payload:JSON.stringify({user:{customIDs:{account_id:account}},data:'中文😀'.repeat(1400)}),defaultEnableFeatures:{flag:true},executionValues:{instructions:{enabled:true}},...extra}
+}]});
+const cache = new StatsigCache();
+const cold=cache.connect(),a=message();
+assert.equal(cold.hint.hash,null);
+assert.strictEqual(referenceStatsig(a,null),a,'cold publication sends immediately');
+assert.strictEqual(cold.expand(a),a);
+const warm=cache.connect();
+assert(warm.hint.hash);
+const ref=referenceStatsig(a,warm.hint.hash);
+assert(!Object.hasOwn(ref.args[0],'value'));
+assert.equal(ref.requestId,a.requestId);
+assert.deepEqual(warm.expand(ref),a);
+const reordered=message();
+const parsed=JSON.parse(reordered.args[0].value.payload);
+reordered.args[0].value.payload=JSON.stringify({data:parsed.data,user:parsed.user});
+const orderedRef=referenceStatsig(reordered,warm.hint.hash);
+assert(orderedRef.args[0].statsigReference,'key order alone must hit cache');
+assert.deepEqual(JSON.parse(warm.expand(orderedRef).args[0].value.payload),parsed);
+const changedArray=message('a',{executionValues:{list:[1,2]}});cold.expand(changedArray);
+const arraySession=cache.connect();
+const reversed=message('a',{executionValues:{list:[2,1]}});
+assert.strictEqual(referenceStatsig(reversed,arraySession.hint.hash),reversed,'array order is significant');
+const delivered=warm.expand(ref);delivered.args[0].value.executionValues.instructions.enabled=false;
+assert.deepEqual(warm.expand(ref),a,'native mutation cannot change pinned data');
+const b=message('b');
+assert.strictEqual(referenceStatsig(b,warm.hint.hash),b,'account change sends full');
+cold.expand(b);
+assert.deepEqual(warm.expand(ref),a,'another tab/account never invalidates advertised snapshot');
+for(const extra of [{executionValues:{instructions:{enabled:false}}},{defaultEnableFeatures:{flag:false}},{userId:'different'},{authMethod:'apikey'},{stableId:'different'},{sdkKey:'different'},{unknownField:'preserved'},{payload:JSON.stringify({user:{customIDs:{account_id:'a'}},data:'变化😀'.repeat(1400)})},{payload:null},{payload:undefined}]){
+ const changed=message('a',extra);assert.strictEqual(referenceStatsig(changed,warm.hint.hash),changed);
+}
+assert.equal(new StatsigCache().connect().hint.hash,null,'restart starts cold');
+assert.throws(()=>cold.expand(ref),/Invalid Statsig/,'unadvertised reference is rejected');
+const invalid=structuredClone(ref);invalid.args[0].value={};assert.throws(()=>warm.expand(invalid),/Invalid Statsig/);
+const next={type:'ipc-renderer-invoke',requestId:'next',channel:'codex_desktop:message-from-view',args:[{type:'mcp-request',request:{method:'turn/start',params:{input:[{type:'text',text:'synthetic only'}]}}}]};
+assert.strictEqual(referenceStatsig(next,warm.hint.hash),next);
+assert.strictEqual(warm.expand(next),next);
+assert.deepEqual([ref,next].map(m=>warm.expand(m).requestId),['config','next'],'config and following request stay in-order synchronously');
+const latest=cache.connect();assert.deepEqual(latest.expand(referenceStatsig(b,latest.hint.hash)),b);
+warm.close();assert.throws(()=>warm.expand(ref),/Invalid Statsig/);
+const large=message('a',{payload:'x'.repeat(17*1024*1024)});
+cold.expand(large);assert.equal(cache.connect().hint.hash,latest.hint.hash,'oversized values are passed through without retaining');
+const timer=performance.now();for(let i=0;i<100;i++)referenceStatsig(a,cache.connect().hint.hash);
+console.log(JSON.stringify({result:'PASS',coverage:['cold/warm','identity/all fields','null/loading','multi-tab pinned snapshot','restart','mutation isolation','invalid reference','size cap','synchronous ordering'],hash100SmallMs:Math.round(performance.now()-timer)}));

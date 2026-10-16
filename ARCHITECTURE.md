@@ -1,66 +1,13 @@
-# architecture
+# 架构
 
-a bit on how this whole thing is put together.
+`scripts/prepare-desktop.mjs` 下载并校验固定版本的官方 Desktop 归档，只提取所需资源，再应用 `patches/` 和各功能补丁。提取结果位于 `scratch/`，不进入 Git。
 
-the general approach here is to download the electron app, unpack it and apply
-as small a set of patches to it as possible to get it working.
+`src/server/main.ts` 提供静态资源、上传接口和 WebSocket 桥，通过 `src/server/electron/` 模拟原生 Electron 接口并运行 Desktop 的宿主代码。`src/browser/shim.ts` 将 preload 通信连接到这个桥，并处理浏览器路由和文件选择。
 
-an electron app has two parts, a part which runs in the main process and a part
-which runs in the renderer process.
+`renderer-sessions.ts` 维护渲染器身份、连接代次、事件重放和命令去重。`resumable-bridge.ts` 处理浏览器重连和确认；`src/shared/` 提供配置与状态传输编码。`global-state-sync.ts` 同步宿主的持久状态。
 
-the main process part is basically a node process with a `require('electron')`
-dependency. it runs even before anything is visible on the screen, setting up
-the system tray widget, running background tasks and hooking up listeners for
-app launcher events. there is a single instance of the main process regardless
-of how many windows are open.
+`scripts/patch-webview.mjs` 组合会话、历史、工具和移动端补丁。`ops/build-mobile-pwa.mjs` 生成 Full 的 PWA 资源，`scripts/build-lite.mjs` 在相同源码上构建 Lite。`ops/` 中保留可复用的界面资源，私人部署与运维脚本不在仓库中。
 
-the ui runs inside an electron renderer process. in the desktop app, this looks
-sorta like a browser with some modifications to the browser's chrome. it handles
-displaying the interface, reacting to events from user interaction and holding
-onto state which lives close to the ui (what text is in the prompt box for
-example).
+浏览器面板由 Playwright 控制的宿主浏览器提供画面和输入通道。可视化内容运行在独立沙箱。Sub2API 的管理凭据仅由服务端读取，浏览器接收用量结果。
 
-the electron renderer process usually launched by the electron main process. the
-main process and render process communicate via an IPC setup in a [preload
-script]. the preload script is injected into the renderer process before
-anything else loads, has privileged access and can expose functions and data to
-the renderer realm through `contextBridge.exposeInMainWorld`. the preload script
-has access to [`ipcRenderer`].
-
-codex-web hooks the preload script by providing [shim.ts](./src/browser/shim.ts)
-as a stand-in for electron in the renderer process and then setting up preload
-to run in the renderer realm (see
-[vite.browser.config.ts](./vite.browser.config.ts)).
-
-next, we apply a series of patches to both code running in the main process and
-the renderer process. these are applied at postinstall time through the
-[`prepare_asar`](./scripts/prepare_asar) script. patches are located
-in [./patches](./patches) and applied ontop of the prettified code extracted
-from the upstream app. care was taken here to patch at installation time to
-avoid redistributing the original code.
-the [./patches/webview-preload.patch](patches/webview-preload.patch) connects
-the shimmed preload script to the index.html entrypoint.
-
-we aim for the patches to be as small as possible as they're the most annoying
-part to change. the patches today are mostly around routing, urls, page title,
-pwa and mobile behavior.
-
-to connect the ipc from the renderer process to the main process, we use a
-websocket for most messages intercepting and handing a small handful of messages
-directly (file picker, workspace picker). today, the remaining parts of shim are
-for connecting the in memory router to the browser history and setting up the
-sidebar behavior on mobile.
-
-the ipc websocket is hosted by [main.ts](./src/server/main.ts). this process
-binds a port and listens for incoming websocket connections. it also shims
-electron (see `installModuleAliasHook`) before loading the electron shell
-entrypoint. the shims are located in
-[./src/server/electron](./src/server/electron) and focus on providing the
-minimum amount of functionality needed to make the app work. this comes down to
-some network transport to the outside world and hooking up to the ipc pipe from
-the renderer. this part is the most sloppy part of the codebase as i left codex
-to figure it out unattended. the parts around `__codexElectronIpcBridge` are the
-important bits related to wiring up the ipc bridge.
-
-[preload script]: https://www.electronjs.org/docs/latest/tutorial/tutorial-preload
-[`ipcRenderer`]: https://www.electronjs.org/docs/latest/api/ipc-renderer
+构建后的 Desktop 应用遵循其原有许可。公开 Git 仓库保存本项目代码与补丁。

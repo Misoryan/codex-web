@@ -1,0 +1,41 @@
+const assert = require('node:assert/strict');
+const {capacityReport,createCapacityService} = require('../src/server/sub2api-capacity.js');
+let now=Date.parse('2026-10-05T00:00:00Z');
+const date=m=>new Date(now+m*60000).toISOString();
+const account=(id,used=25,reset=60,patch={})=>({id,platform:'openai',type:'oauth',group_ids:[2],status:'active',schedulable:true,credentials:{plan_type:'pro',access_token:'never-expose',subscription_expires_at:date(40)},extra:{codex_7d_used_percent:used,codex_7d_reset_at:date(reset),codex_7d_window_minutes:10080,codex_usage_updated_at:date(0)},...patch});
+(async()=>{
+ const rows=[account(1),account(2,50,90),account(3,100,91),account(4,0,60,{group_ids:[5]}),account(5,0,60,{credentials:{plan_type:'prolite'}}),account(6,0,60,{credentials:{plan_type:'plus'},rate_limit_reset_at:date(10)}),account(7,0,60,{schedulable:false}),account(8,0,60,{expires_at:date(-1)}),account(9,10,60,{rate_limit_reset_at:date(2)})];
+ const r=capacityReport(rows,[2],now);
+ assert.equal(r.proCount,4);assert.equal(r.remainingPercent,125);assert.equal(r.totalPercent,400);
+ assert.equal(r.nextReset.count,3);assert.equal(r.nextReset.refillPercent,85);assert.equal(r.nextReset.renewalUncertain,3);
+ assert.equal(r.accounts.length,8);assert.equal(r.accounts.find(a=>a.id===6).available,false);
+ assert(!JSON.stringify(r).includes('never-expose'));assert(!JSON.stringify(r).includes('credentials'));
+ assert.equal(capacityReport([account(1,-1)],[2],now).remainingPercent,null);
+ assert.equal(capacityReport([account(1,10,-1)],[2],now).missingAccounts,1);
+ assert.equal(capacityReport([account(1,10,60,{extra:{}})],[2],now).remainingPercent,null);
+ assert.throws(()=>capacityReport([account(1),account(1)],[2],now));
+ let calls=[],mode='ok';
+ const http=async(url,options)=>{
+  calls.push(url);assert.equal(options.redirect,'error');assert.equal(options.headers['x-api-key'],'secret');
+  await new Promise(r=>setTimeout(r,5));
+  if(mode==='fail')return new Response('',{status:503});
+  if(mode==='429')return new Response('',{status:429,headers:{'retry-after':'600'}});
+  const u=new URL(url);assert(!u.pathname.endsWith('/usage'));
+  const keys=u.pathname.endsWith('/api-keys');
+  const items=keys?[{status:'active',group_id:2,group:{platform:'openai'}},{status:'active',group_id:10,group:{platform:'kimi'}},{status:'disabled',group_id:5,group:{platform:'openai'}}]:rows;
+  return Response.json({code:0,data:{items:mode==='truncated'&&!keys?[]:items,total:items.length}});
+ };
+ const config={baseUrl:'https://example.invalid',adminKey:'secret',userId:6};
+ const service=createCapacityService(config,http,()=>now);
+ const many=await Promise.all(Array.from({length:10},()=>service.read()));assert.equal(calls.length,2);assert.equal(many[0].report.remainingPercent,125);
+ await service.read();assert.equal(calls.length,2);
+ now+=60001;mode='fail';const failed=await service.read();assert(failed.stale);assert.equal(failed.report.remainingPercent,125);await service.read();assert.equal(calls.length,3);
+ now+=60001;mode='ok';assert.equal((await service.read()).stale,false);assert.equal(calls.length,4);
+ now+=60001;mode='429';await service.read();const count=calls.length;now+=120000;await service.read();assert.equal(calls.length,count);
+ mode='truncated';const incomplete=await createCapacityService(config,http,()=>now).read();assert(incomplete.stale);assert.equal(incomplete.report,null);
+ // Pagination cannot silently accept just the first page.
+ let pages=0;
+ const paged=async url=>{const u=new URL(url);if(u.pathname.endsWith('/api-keys'))return Response.json({code:0,data:{items:[{status:'active',group_id:2,group:{platform:'openai'}}],total:1}});pages++;return Response.json({code:0,data:{items:[account(pages)],total:2}})};
+ assert.equal((await createCapacityService(config,paged,()=>now).read()).report.proCount,2);assert.equal(pages,2);
+ console.log('PASS: accessible pool, subscription quota, unavailable accounts, reset batches, missing snapshots, secret filtering, cache/singleflight, pagination, stale recovery and 429 backoff; no probes');
+})().catch(e=>{console.error(e);process.exitCode=1});

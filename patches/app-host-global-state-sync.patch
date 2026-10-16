@@ -1,0 +1,29 @@
+--- a/.vite/build/startup-requirements-C6B1x9gL.js
++++ b/.vite/build/startup-requirements-C6B1x9gL.js
+@@ -4238,6 +4238,7 @@
+             ((this.persistScheduledForAtoms = !1),
+             this.queueGlobalStatePersistence());
+         }, Or)));
++      globalThis.__codexElectronIpcBridge?.synchronizeGlobalState(this, state => qr(this.filePath, state));
+     }
+     getStateFilePath() {
+       return this.filePath;
+--- a/.vite/build/main-CqEoQDOU.js
++++ b/.vite/build/main-CqEoQDOU.js
+@@ -176201,6 +176201,16 @@
+     updateDockIcon: L,
+     setWindowContext: (e) => {
+       R = e;
++      if (globalThis.__codexElectronIpcBridge) {
++        globalThis.__codexElectronIpcBridge.onGlobalStateChanged = keys => {
++          z.sendMessageToAllWindows({type: `global-state-updated`, keys});
++          if (keys.includes("electron-persisted-atom-state")) {
++            for (const window of e.registeredWindows.values()) {
++              if (!window.isDestroyed()) e.messageHandler.sendPersistedAtomState(window.webContents);
++            }
++          }
++        };
++      }
+       globalThis.__codexElectronIpcBridge?.setRendererWindowFactory(() =>
+         z.createPrimaryWindow({ show: !1 }),
+       );

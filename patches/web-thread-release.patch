@@ -1,0 +1,49 @@
+--- a/.vite/build/main-CqEoQDOU.js
++++ b/.vite/build/main-CqEoQDOU.js
+@@ -159424,9 +159424,45 @@
+           this.disposeIpcClientForWebContents(e);
+         }));
+     }
++    detachedWebThreads = new Set();
++    releaseDetachedWebThreads(keys) {
++      for (const key of keys) {
++        if (this.detachedWebThreads.has(key)) continue;
++        this.detachedWebThreads.add(key);
++        const split = key.lastIndexOf(":"), hostId = key.slice(0, split), threadId = key.slice(split + 1);
++        const check = async () => {
++          let retry = false;
++          try {
++            const owns = () => [...this.ipcClientsByWebContentsId.values()].some(({hostService}) => hostService.ownsThread(hostId, r.bs(threadId)));
++            if (owns()) return;
++            const connection = this.appServerConnectionRegistry.getConnection(hostId);
++            const thread = await connection.readThread(threadId, {includeTurns: false});
++            if (!thread || thread.status.type === "notLoaded") return;
++            if (thread.status.type !== "idle") {retry = true; return;}
++            const views = await Promise.allSettled(Array.from(this.options.appViewsByWebContentsId.values(), async view => i.h((await view.services).clientCoordination, hostId, r.bs(threadId))));
++            if (owns() || views.some(result => result.status === "rejected" || result.value)) return;
++            const current = await connection.readThread(threadId, {includeTurns: false});
++            if (current.status.type !== "idle") {retry = current.status.type !== "notLoaded"; return;}
++            await connection.unsubscribeThread(threadId);
++          } catch (error) {
++            retry = true;
++            console.warn("[web-thread-release] cleanup deferred", {hostId, threadId, message: String(error)});
++          } finally {
++            if (retry) setTimeout(check, 5000).unref();
++            else this.detachedWebThreads.delete(key);
++          }
++        };
++        void check();
++      }
++    }
+     disposeIpcClientForWebContents(e) {
+       let t = this.ipcClientsByWebContentsId.get(e.id);
+-      t && (this.ipcClientsByWebContentsId.delete(e.id), t.dispose());
++      if (t) {
++        const owned = [...t.hostService.ownedThreads];
++        this.ipcClientsByWebContentsId.delete(e.id);
++        t.dispose();
++        this.releaseDetachedWebThreads(owned);
++      }
+     }
+   },
+   Z5 = {
