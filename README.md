@@ -13,6 +13,8 @@ A self-hosted browser bridge for Codex Desktop, with Full/Lite interfaces, mobil
 - 浏览器面板、可视化沙箱、可选 Sub2API 用量面板。
 - Windows 启停脚本，以及源码和 Git 历史的发布前隐私检查。
 
+手机设置在 768px 及以下使用分类列表和独立详情页。点击分类进入详情，左上角返回分类；搜索、分类行和表单复用 Desktop 组件。桌面保留双栏布局。
+
 公开仓库只包含项目源码、补丁和通用文档。构建时从官方地址下载 Desktop 归档并在本机应用补丁。
 
 ## 安装与运行

@@ -25,6 +25,8 @@ import {patchAsyncQuestionSync} from './async-question-sync-patch.mjs';
 import {patchActivityFreshnessInitial,patchActivityFreshnessShared} from './activity-freshness-patch.mjs';
 import {patchActivityQuestionAnswers} from './activity-question-answers-patch.mjs';
 import {patchUnreadCatalogState,patchConversationOpening} from './chat-loading-patch.mjs';
+import {patchMobileSettings} from './mobile-settings-patch.mjs';
+import {patchPlanClick} from './plan-click-patch.mjs';
 export async function patchWebview(root='scratch/asar/webview/assets'){
  const entries=[
  ['app-initial-6350d04672d0.js',[patchServiceTier,patchImagePreviewInitial,patchBrowserAttachments,patchBrowserUploads,patchUngroupedPinned,patchSubagentInheritance,patchSub2ApiTrigger,patchActivityEntrypoint,patchActivityProjectIcon,patchMobileNewTabs,patchMobileHistoryNavigation,patchMobileNavigationFooter,patchSidebarPagination,patchAsyncQuestionSync,patchActivityFreshnessInitial,patchUnreadCatalogState,s=>s.replace('return sp(lm.theme) ?? `system`;','return `system`;')]],
@@ -32,8 +34,9 @@ export async function patchWebview(root='scratch/asar/webview/assets'){
  ['app-primary-6f60e9ac4103.js',[patchAgentTitleRows,patchDraftSubmission,patchContextUsageButton,patchBrowserAttachmentCapability,patchPickedImageMime,patchFollowupSubmission]],
  ['profile-dropdown-items-d842ad78cd70.js',[patchSub2ApiUsage]],
  ['general-settings-65e65871cdcd.js',[patchFontMenu]],
+ ['settings-page-50e3fab957b6.js',[patchMobileSettings]],
  ['local-conversation-page-a83a1af2c24b.js',[patchAgentTitleHeader]],
- ['sites-end-resource-78b98c374310.js',[patchAgentActivityTitles]],
+ ['sites-end-resource-78b98c374310.js',[patchAgentActivityTitles,patchPlanClick]],
  ['tab-content-24fe1f531bbe.js',[patchBrowserToolbar]],
  ['open-local-conversation-subagents-panel-5abfac9190b9.js',[patchSubagentPanel]],
  ['verify-descendant-d02f27822163.js',[patchSubagentVerification]],
