@@ -50,7 +50,11 @@
   }
 
   body:has([data-browser-mcp-header]) [data-app-shell-titlebar] {
-    background: transparent !important;
+    inset-inline-start: 0 !important;
+    inset-inline-end: auto !important;
+    width: 44px;
+    height: 46px;
+    background: var(--color-surface) !important;
   }
 
   body:has([data-browser-mcp-header]) [class*="ApplicationMenuTopBar"]:has([data-app-shell-sidebar-trigger]) {
