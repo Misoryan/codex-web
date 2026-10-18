@@ -27,7 +27,10 @@ import {patchActivityQuestionAnswers} from './activity-question-answers-patch.mj
 import {patchUnreadCatalogState,patchConversationOpening} from './chat-loading-patch.mjs';
 import {patchMobileSettings} from './mobile-settings-patch.mjs';
 import {patchPlanClick} from './plan-click-patch.mjs';
+import {patchWorkflowEntrypoint} from './workflow-ui-patch.mjs';
 export async function patchWebview(root='scratch/asar/webview/assets'){
+ const entry=path.join(root,'app-initial-6350d04672d0.js');
+ await fs.writeFile(entry,patchWorkflowEntrypoint(await fs.readFile(entry,'utf8')));
  const entries=[
  ['app-initial-6350d04672d0.js',[patchServiceTier,patchImagePreviewInitial,patchBrowserAttachments,patchBrowserUploads,patchUngroupedPinned,patchSubagentInheritance,patchSub2ApiTrigger,patchActivityEntrypoint,patchActivityProjectIcon,patchMobileNewTabs,patchMobileHistoryNavigation,patchMobileNavigationFooter,patchSidebarPagination,patchAsyncQuestionSync,patchActivityFreshnessInitial,patchUnreadCatalogState,s=>s.replace('return sp(lm.theme) ?? `system`;','return `system`;')]],
  ['app-shared-8bd9d0399038.js',[patchSubagentHistory,patchAgentTitleMetadata,patchSidebarStatus,patchDraftPersistence,patchNativeOpen,patchBrowserFonts,patchBrowserView,patchIdleThreadOwnership,patchBrowserAppInfo,patchInactiveSteer,patchLatestHistoryTail,patchActivityFreshnessShared,patchActivityQuestionAnswers,patchConversationOpening,s=>s.includes('k3 as codexWebConversationField')?s:s+'\nexport {k3 as codexWebConversationField};\n']],

@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import { WorkflowStore } from "./store";
 import { createWorkflowThread, workflowHost, workflowManager, workflowSnapshot } from "./host";
 
@@ -25,6 +24,7 @@ export async function registerWorkflow(app: FastifyInstance) {
   const allowedOrigins = new Set((process.env.CODEX_WORKFLOW_ORIGINS ?? "").split(",").filter(Boolean));
   const locks = new Set<string>();
   let polling = false;
+  let notificationConnection: any, unsubscribe: (() => void) | undefined;
   async function sameOrigin(request: FastifyRequest, reply: any) {
     const origin = request.headers.origin;
     const localOrigin = `http://${request.headers.host}`;
@@ -98,6 +98,15 @@ export async function registerWorkflow(app: FastifyInstance) {
     if (polling) return;
     polling = true;
     try {
+      const connection = workflowHost()?.getLocalAppServerClient();
+      if (connection && connection !== notificationConnection) {
+        unsubscribe?.(); notificationConnection = connection;
+        unsubscribe = connection.registerInternalNotificationHandler((message: any) => {
+          if (message.method !== "turn/plan/updated") return;
+          const task = store.list().find(task => task.threadId === message.params?.threadId);
+          if (task) store.update(task.id, { plan: message.params.plan }, "plan.updated");
+        });
+      }
       for (const task of store.list().filter(task => task.threadId)) {
         try {
           const snapshot = await workflowSnapshot(task.threadId!);
@@ -107,5 +116,5 @@ export async function registerWorkflow(app: FastifyInstance) {
     } finally { polling = false; }
   }, 2000);
   timer.unref();
-  app.addHook("onClose", async () => { clearInterval(timer); store.close(); });
+  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); store.close(); });
 }
