@@ -49,6 +49,10 @@
     background: var(--color-surface);
   }
 
+  body:has([data-browser-mcp-header]) [data-app-shell-titlebar] {
+    background: transparent !important;
+  }
+
   html[data-theme="dark"] [data-app-shell-titlebar] {
     background-color: var(--color-surface);
   }
