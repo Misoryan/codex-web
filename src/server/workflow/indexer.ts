@@ -23,13 +23,13 @@ export async function importProjectThreads(store: WorkflowStore, cwd: string, di
   try { await fs.access(file); } catch { return; }
   const db = new Database(file, { readonly: true, fileMustExist: true });
   let rows: any[];
-  try { rows = db.prepare("SELECT id,name,title,preview,first_user_message,cwd,source,updated_at,project_id FROM threads WHERE archived=0 AND has_user_event=1 ORDER BY updated_at DESC LIMIT 1000").all(); }
+  try { rows = db.prepare("SELECT id,name,title,preview,first_user_message,cwd,source,updated_at,project_id FROM threads WHERE archived=0 AND first_user_message<>'' ORDER BY updated_at DESC LIMIT 1000").all(); }
   finally { db.close(); }
   const existing = new Set(store.list().map(task => task.threadId));
   for (const row of rows) {
     if (!within(cwd, row.cwd) || row.source.includes("subagent") || existing.has(row.id)) continue;
     const title = (row.name || row.title || "EaseCation 工作").slice(0, 200);
-    const prompt = row.first_user_message || row.preview || title;
+    const prompt = row.first_user_message;
     const { task, token } = store.create("thread:" + row.id, { title, prompt: prompt.slice(0, 32000), kind: "improvement", cwd: row.cwd });
     const issue = issueFrom(prompt + "\n" + title);
     store.update(task.id, { threadId: row.id, issue, project: row.cwd === cwd ? "EaseCation" : path.basename(row.cwd),

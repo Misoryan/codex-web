@@ -6,6 +6,7 @@ const {randomUUID} = require('node:crypto');
 const childProcess = require('node:child_process');
 const {promisify} = require('node:util');
 const ts = require('typescript');
+const Database = require('better-sqlite3');
 
 // Git, SQLite, HTTP handlers and lifecycle decisions run unchanged. Only external services are fixtures.
 const sourceRoot = path.resolve('src/server/workflow');
@@ -45,6 +46,7 @@ const {WorkflowStore} = load('store');
 const {WorkflowLifecycle} = load('lifecycle');
 const {removeWorktree} = load('git');
 const {registerWorkflow} = load('routes');
+const {importProjectThreads} = load('indexer');
 const prefix = '/__backend/workflow';
 const savedEnvironment = {...process.env};
 const previousHost = global.__codexWorkflowHost;
@@ -148,6 +150,59 @@ function resetScenario() {
 async function reconcile(store, id, archive = true) { return new WorkflowLifecycle(store, scenarioRoot).reconcile(id, archive); }
 const scenarios = [];
 function scenario(name, run) { scenarios.push({name, run}); }
+
+scenario('从当前 Codex SQLite 索引已有项目会话，排除空会话、子代理、归档和其他项目且重复导入不新增', async () => {
+  const sourceFile = path.join(process.env.CODEX_HOME, 'state_5.sqlite');
+  const source = new Database(sourceFile);
+  try {
+    source.exec(`CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT, preview TEXT,
+      first_user_message TEXT, cwd TEXT, source TEXT, updated_at INTEGER, project_id TEXT,
+      archived INTEGER, has_user_event INTEGER)`);
+    const insert = source.prepare('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    const entries = [
+      ['root-chat', 'Root task', scenarioRoot, 'cli', 'Mobius #321 synthetic requirement', 0],
+      ['nested-chat', 'Nested task', path.join(scenarioRoot, 'project'), 'vscode', 'Synthetic feature requirement', 0],
+      ['subagent-chat', 'Subagent task', scenarioRoot, '{"subagent":"worker"}', 'Synthetic agent requirement', 0],
+      ['outside-chat', 'Outside task', path.join(scenarioRoot + '-outside', 'project'), 'cli', 'Synthetic outside requirement', 0],
+      ['archived-chat', 'Archived task', scenarioRoot, 'cli', 'Synthetic archived requirement', 1],
+      ['empty-chat', 'Empty task', scenarioRoot, 'vscode', '', 0],
+      ['null-chat', 'Null task', scenarioRoot, 'cli', null, 0],
+    ];
+    for (const [id, name, cwd, origin, prompt, archived] of entries) {
+      insert.run(id, name, 'Synthetic title', 'Synthetic preview', prompt, cwd, origin, 1700000000, null, archived, 0);
+    }
+    assert.equal(source.prepare('SELECT count(*) AS count FROM threads WHERE archived=0 AND has_user_event=1').get().count, 0,
+      'The retired has_user_event flag does not identify these existing user conversations');
+  } finally { source.close(); }
+  const before = fs.readFileSync(sourceFile);
+  const store = storeFixture(), directory = fixtureDirectory('index-data');
+  await importProjectThreads(store, scenarioRoot, directory);
+  const imported = store.list();
+  assert.deepEqual(imported.map(task => task.threadId).sort(), ['nested-chat', 'root-chat']);
+  assert(imported.every(task => task.imported && task.managed === false));
+  const rootTask = imported.find(task => task.threadId === 'root-chat');
+  assert.equal(rootTask.prompt, 'Mobius #321 synthetic requirement');
+  assert.equal(rootTask.issue.number, 321);
+  assert.equal(rootTask.updatedAt, '2023-11-14T22:13:20.000Z');
+  assert.equal(imported.find(task => task.threadId === 'nested-chat').cwd, path.join(scenarioRoot, 'project'));
+  const contexts = new Map(imported.map(task => {
+    const file = path.join(directory, 'contexts', task.id + '.json');
+    const text = fs.readFileSync(file, 'utf8'), context = JSON.parse(text);
+    assert.equal(context.workflowId, task.id);
+    assert.equal(context.endpoint, 'http://workflow.example.invalid/__backend/workflow');
+    assert(store.validToken(task.id, context.token));
+    return [file, text];
+  }));
+  const eventCount = store.db.prepare('SELECT count(*) AS count FROM events').get().count;
+  await importProjectThreads(store, scenarioRoot, directory);
+  assert.deepEqual(store.list(), imported);
+  assert.equal(store.db.prepare('SELECT count(*) AS count FROM events').get().count, eventCount);
+  assert.equal(fs.readdirSync(path.join(directory, 'contexts')).length, 2);
+  for (const [file, text] of contexts) assert.equal(fs.readFileSync(file, 'utf8'), text);
+  assert.deepEqual(fs.readFileSync(sourceFile), before, 'Import must leave the source database unchanged');
+  assert.deepEqual(nativeReadCalls, []);
+  assert.deepEqual(archived, []);
+});
 
 scenario('进入验收才请求待测试；Möbius 返回状态与目标状态分别保存', async () => {
   const store = storeFixture();
