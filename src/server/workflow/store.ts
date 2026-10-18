@@ -22,7 +22,9 @@ export class WorkflowStore {
       data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL, time TEXT NOT NULL,
-      kind TEXT NOT NULL, data TEXT NOT NULL);`);
+      kind TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS messages (
+      request_key TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, text_hash TEXT NOT NULL, status TEXT NOT NULL);`);
   }
   list(): Workflow[] {
     return this.db.prepare("SELECT data FROM workflows ORDER BY rowid DESC").all()
@@ -69,5 +71,16 @@ export class WorkflowStore {
     return this.db.prepare("SELECT seq,time,kind,data FROM events WHERE workflow_id=? ORDER BY seq DESC LIMIT 100")
       .all(id).map((row: any) => ({ ...row, data: JSON.parse(row.data) }));
   }
+  reserveMessage(key: string, id: string, text: string) {
+    const hash = createHash("sha256").update(text).digest("hex");
+    const existing = this.db.prepare("SELECT * FROM messages WHERE request_key=?").get(key);
+    if (existing) {
+      if (existing.workflow_id !== id || existing.text_hash !== hash) throw Error("发送编号与消息不匹配");
+      return existing.status as string;
+    }
+    this.db.prepare("INSERT INTO messages VALUES (?,?,?,?)").run(key, id, hash, "pending");
+    return null;
+  }
+  acceptMessage(key: string) { this.db.prepare("UPDATE messages SET status='accepted' WHERE request_key=?").run(key); }
   close() { this.db.close(); }
 }

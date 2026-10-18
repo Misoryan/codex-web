@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WorkflowStore } from "./store";
 import { createWorkflowThread, workflowHost, workflowManager, workflowSnapshot } from "./host";
 
@@ -21,6 +22,9 @@ export async function registerWorkflow(app: FastifyInstance) {
   if (!cwd) return;
   const directory = path.resolve(process.env.CODEX_WORKFLOW_DATA ?? path.join(process.env.CODEX_HOME!, "workflow"));
   const store = new WorkflowStore(directory);
+  const agentToken = randomBytes(32).toString("hex");
+  const endpoint = process.env.CODEX_WORKFLOW_LOCAL_URL + prefix;
+  await fs.writeFile(path.join(directory, "service.json"), JSON.stringify({ endpoint, agentToken }), { mode: 0o600 });
   const allowedOrigins = new Set((process.env.CODEX_WORKFLOW_ORIGINS ?? "").split(",").filter(Boolean));
   const locks = new Set<string>();
   let polling = false;
@@ -36,6 +40,23 @@ export async function registerWorkflow(app: FastifyInstance) {
     catch (error) { return { ready: false, cwd, error: (error as Error).message }; }
   });
   app.get(prefix, async () => store.list());
+  app.post(prefix + "/attach", { schema: { body: { type: "object", additionalProperties: false,
+    required: ["threadId"], properties: { threadId: { type: "string", format: "uuid" } },
+  } } }, async (request, reply) => {
+    const supplied = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
+    if (supplied.length !== agentToken.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(agentToken))) return reply.code(403).send({ error: "本机工作流凭据无效" });
+    const { threadId } = request.body as { threadId: string };
+    const existing = store.list().find(task => task.threadId === threadId);
+    if (existing) return JSON.parse(await fs.readFile(path.join(directory, "contexts", existing.id + ".json"), "utf8"));
+    const thread = await workflowHost().getLocalAppServerClient().readThread(threadId, { includeTurns: false });
+    if (path.resolve(thread.cwd).toLowerCase() !== path.resolve(cwd).toLowerCase()) return reply.code(400).send({ error: "当前会话不在工作流项目目录中" });
+    const { task, token } = store.create("thread:" + threadId, { title: thread.name ?? thread.preview?.slice(0, 120) ?? "EaseCation 工作", kind: "improvement", prompt: thread.preview ?? "", cwd });
+    store.update(task.id, { threadId, status: "running", runtime: thread.status?.type ?? "unknown" }, "attached");
+    const context = { workflowId: task.id, endpoint, token };
+    await fs.mkdir(path.join(directory, "contexts"), { recursive: true });
+    await fs.writeFile(path.join(directory, "contexts", task.id + ".json"), JSON.stringify(context), { mode: 0o600 });
+    return context;
+  });
   app.get<{ Params: { id: string } }>(prefix + "/:id", async (request, reply) => {
     const task = store.get(request.params.id);
     return task ? { ...task, events: store.events(task.id) } : reply.code(404).send({ error: "工作流不存在" });
@@ -54,7 +75,7 @@ export async function registerWorkflow(app: FastifyInstance) {
     void (async () => {
       const contextFile = path.join(directory, "contexts", task.id + ".json");
       await fs.mkdir(path.dirname(contextFile), { recursive: true });
-      await fs.writeFile(contextFile, JSON.stringify({ workflowId: task.id, endpoint: process.env.CODEX_WORKFLOW_LOCAL_URL + prefix, token }), { mode: 0o600 });
+      await fs.writeFile(contextFile, JSON.stringify({ workflowId: task.id, endpoint, token }), { mode: 0o600 });
       const prompt = `${task.prompt}\n\n使用 $easecation-workflow 推进这项${({ feature: "新功能", fix: "问题修复", improvement: "改进", research: "调研" } as any)[task.kind]}工作。工作流编号：${task.id}。进度上报上下文文件：${contextFile}。使用 Skill 中的 report-progress.py 更新实际阶段、摘要、阻塞和证据。上下文内的令牌不得写入 Git、文档或回复。`;
       try {
         await createWorkflowThread(task, prompt, threadId => store.update(task.id, { threadId }, "thread.created"));
@@ -75,14 +96,22 @@ export async function registerWorkflow(app: FastifyInstance) {
     return store.update(id, report, "progress");
   });
   app.post<{ Params: { id: string } }>(prefix + "/:id/message", { preHandler: sameOrigin,
-    schema: { body: { type: "object", additionalProperties: false, required: ["text"], properties: { text: { type: "string", minLength: 1, maxLength: 32000 } } } },
+    schema: { body: { type: "object", additionalProperties: false, required: ["text", "requestKey"], properties: {
+      text: { type: "string", minLength: 1, maxLength: 32000 }, requestKey: { type: "string", format: "uuid" },
+    } } },
   }, async (request, reply) => {
     const id = request.params.id, task = store.get(id);
     if (!task?.threadId) return reply.code(409).send({ error: "会话尚未创建" });
     if (locks.has(id)) return reply.code(409).send({ error: "消息正在发送" });
+    const input = request.body as { text: string; requestKey: string };
+    if (!input.text.trim()) return reply.code(400).send({ error: "请填写补充说明" });
+    const delivery = store.reserveMessage(input.requestKey, id, input.text);
+    if (delivery === "accepted") return { ok: true };
+    if (delivery) return reply.code(409).send({ error: "上次消息仍待确认，请在 Codex 中查看发送结果" });
     locks.add(id);
     try {
-      await workflowManager().sendFollowUpMessage(task.threadId, { prompt: (request.body as any).text });
+      await workflowManager().sendFollowUpMessage(task.threadId, { prompt: input.text });
+      store.acceptMessage(input.requestKey);
       store.update(id, { status: "running", error: null }, "message.sent");
       return { ok: true };
     } catch (error) { return reply.code(409).send({ error: (error as Error).message }); }
