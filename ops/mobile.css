@@ -53,6 +53,11 @@
     background: transparent !important;
   }
 
+  body:has([data-browser-mcp-header]) [class*="ApplicationMenuTopBar"]:has([data-app-shell-sidebar-trigger]) {
+    height: 46px;
+    background: var(--color-surface) !important;
+  }
+
   html[data-theme="dark"] [data-app-shell-titlebar] {
     background-color: var(--color-surface);
   }
