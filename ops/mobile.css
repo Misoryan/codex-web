@@ -39,6 +39,16 @@
 }
 
 @media (max-width: 768px) {
+  /* The native sidebar button and plugin toolbar share the mobile top row. */
+  [data-browser-mcp-header] {
+    position: fixed;
+    inset: env(safe-area-inset-top, 0px) 0 auto 44px;
+    z-index: 54;
+    height: 46px;
+    min-width: 0;
+    background: var(--color-surface);
+  }
+
   html[data-theme="dark"] [data-app-shell-titlebar] {
     background-color: var(--color-surface);
   }
@@ -314,7 +324,29 @@
   }
 
   [data-app-navigation-rail] {
-    display: none !important;
+    position: fixed;
+    inset: 44px auto env(safe-area-inset-bottom, 0px) 0;
+    z-index: 54;
+    width: 56px !important;
+    display: flex !important;
+    background: var(--color-surface);
+    border-inline-end: 1px solid var(--color-border);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  [data-app-shell-sidebar-open="false"] [data-app-navigation-rail] {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  [data-app-navigation-rail] :is(button, a) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  [data-app-shell-frame]:has([data-app-navigation-rail]) #app-shell-sidebar {
+    padding-inline-start: 56px;
   }
 
   [data-codex-mobile-account-footer] {

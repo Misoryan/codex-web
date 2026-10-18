@@ -28,7 +28,7 @@ const server = http.createServer((request, response) => {
 });
 const wss = new WebSocketServer({server});
 wss.on('connection', (socket, request) => {
-  if (!request.url.startsWith('/__backend/ipc')) {socket.send('unrelated'); socket.close(1000, 'Unrelated socket'); return;}
+  if (!request.url.startsWith('/__backend/native/ipc')) {socket.send('unrelated'); socket.close(1000, 'Unrelated socket'); return;}
   connections++;
   live.add(socket);
   socket.on('close', () => live.delete(socket));

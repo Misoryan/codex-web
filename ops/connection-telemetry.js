@@ -20,7 +20,7 @@
     constructor(...args) {
       super(...args);
       const url = new URL(args[0], location.href);
-      if (url.pathname !== '/__backend/ipc') return;
+      if (url.pathname !== '/__backend/native/ipc') return;
       session = url.searchParams.get('session') || undefined;
       documentId = url.searchParams.get('document') || undefined;
       const currentAttempt = ++attempt;

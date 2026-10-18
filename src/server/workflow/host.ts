@@ -44,7 +44,13 @@ export async function workflowSnapshot(id: string) {
   const conversation = manager.getConversation(id);
   if (!conversation) {
     const client = workflowHost().getLocalAppServerClient();
-    const thread = await client.readThread(id, { includeTurns: false });
+    let thread = await client.readThread(id, { includeTurns: false });
+    if (thread.status?.type === "notLoaded") {
+      thread = await client.readThread(id, { includeTurns: true });
+      if (thread.status?.type !== "notLoaded") return { runtime: thread.status?.type ?? "unknown" };
+      const last = thread.turns?.at(-1);
+      return { runtime: last?.status ?? "unknown" };
+    }
     return { runtime: thread.status?.type ?? "unknown" };
   }
   const turns = conversation.turnHistory?.kind === "canonical"

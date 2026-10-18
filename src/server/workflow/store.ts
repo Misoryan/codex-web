@@ -3,6 +3,11 @@ import path from "node:path";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 
 const Database = require("better-sqlite3");
+export type Delivery = { repo: string; pr: number; url: string; base: string; release: string;
+  head?: string; merge?: string; devMergedAt?: string; masterMergedAt?: string; error?: string };
+export type Worktree = { repo: string; path: string; branch: string; head: string;
+  removalStartedAt?: string; removedAt?: string; releasedAt?: string };
+export type Resource = { kind: "bbdev-lease" | "bedrock-client"; task: string; lease: string; slot?: number; released: boolean };
 export type Workflow = {
   id: string; title: string; kind: string; prompt: string; cwd: string;
   threadId: string | null; stage: string; status: string; summary: string;
@@ -10,6 +15,12 @@ export type Workflow = {
   plan: { step: string; status: string }[]; runtime: string;
   lastMessage: string; pending: number; error: string | null;
   createdAt: string; updatedAt: string;
+  issue: { number: number; url: string } | null; project: string;
+  deliveries: Delivery[]; worktrees: Worktree[]; resources: Resource[];
+  cleanup: { state: "none" | "pending" | "blocked" | "released"; reason: string; checkedAt?: string; releasedAt?: string };
+  archivedAt: string | null; imported: boolean;
+  managed: boolean; projectsRemoved: string[];
+  mobius: { status: string | null; desired: string | null; checkedAt: string | null; error: string | null };
 };
 export class WorkflowStore {
   db: any;
@@ -22,13 +33,12 @@ export class WorkflowStore {
       data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL, time TEXT NOT NULL,
-      kind TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS messages (
-      request_key TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, text_hash TEXT NOT NULL, status TEXT NOT NULL);`);
+      kind TEXT NOT NULL, data TEXT NOT NULL)`);
   }
   list(): Workflow[] {
     return this.db.prepare("SELECT data FROM workflows ORDER BY rowid DESC").all()
-      .map((row: any) => JSON.parse(row.data));
+      .map((row: any) => JSON.parse(row.data))
+      .sort((a: Workflow, b: Workflow) => b.updatedAt.localeCompare(a.updatedAt));
   }
   get(id: string): Workflow | undefined {
     const row = this.db.prepare("SELECT data FROM workflows WHERE id=?").get(id);
@@ -43,7 +53,10 @@ export class WorkflowStore {
     const now = new Date().toISOString();
     const task: Workflow = { ...input, id: randomUUID(), threadId: null, stage: "intake",
       status: "starting", summary: "", evidence: [], plan: [], runtime: "starting",
-      lastMessage: "", pending: 0, error: null, createdAt: now, updatedAt: now };
+      lastMessage: "", pending: 0, error: null, createdAt: now, updatedAt: now,
+      issue: null, project: "EaseCation", deliveries: [], worktrees: [], resources: [],
+      cleanup: { state: "none", reason: "" }, archivedAt: null, imported: false,
+      managed: false, projectsRemoved: [], mobius: { status: null, desired: null, checkedAt: null, error: null } };
     this.db.prepare("INSERT INTO workflows VALUES (?,?,?,?)")
       .run(task.id, key, createHash("sha256").update(token).digest("hex"), JSON.stringify(task));
     this.event(task.id, "created", { title: task.title });
@@ -56,9 +69,9 @@ export class WorkflowStore {
   update(id: string, patch: Partial<Workflow>, event?: string) {
     const previous = this.get(id);
     if (!previous) throw Error("工作流不存在");
-    const next = { ...previous, ...patch, updatedAt: previous.updatedAt };
+    const next = { ...previous, ...patch };
     if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
-    next.updatedAt = new Date().toISOString();
+    next.updatedAt = patch.updatedAt ?? new Date().toISOString();
     this.db.prepare("UPDATE workflows SET data=? WHERE id=?").run(JSON.stringify(next), id);
     if (event) this.event(id, event, patch);
     return next;
@@ -71,16 +84,5 @@ export class WorkflowStore {
     return this.db.prepare("SELECT seq,time,kind,data FROM events WHERE workflow_id=? ORDER BY seq DESC LIMIT 100")
       .all(id).map((row: any) => ({ ...row, data: JSON.parse(row.data) }));
   }
-  reserveMessage(key: string, id: string, text: string) {
-    const hash = createHash("sha256").update(text).digest("hex");
-    const existing = this.db.prepare("SELECT * FROM messages WHERE request_key=?").get(key);
-    if (existing) {
-      if (existing.workflow_id !== id || existing.text_hash !== hash) throw Error("发送编号与消息不匹配");
-      return existing.status as string;
-    }
-    this.db.prepare("INSERT INTO messages VALUES (?,?,?,?)").run(key, id, hash, "pending");
-    return null;
-  }
-  acceptMessage(key: string) { this.db.prepare("UPDATE messages SET status='accepted' WHERE request_key=?").run(key); }
   close() { this.db.close(); }
 }

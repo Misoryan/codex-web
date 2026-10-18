@@ -18,7 +18,7 @@
   window.WebSocket = class extends NativeWebSocket {
     constructor(...args) {
       super(...args);
-      if (new URL(args[0], location.href).pathname !== '/__backend/ipc') return;
+      if (new URL(args[0], location.href).pathname !== '/__backend/native/ipc') return;
       const connection = {connectMs: now(), receivedBytes: 0};
       state.connections.push(connection);
       state.attempts = (state.attempts || 0) + 1;

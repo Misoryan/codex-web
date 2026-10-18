@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WorkflowStore } from "./store";
 import { createWorkflowThread, workflowHost, workflowManager, workflowSnapshot } from "./host";
+import { within, importProjectThreads } from "./indexer";
+import { WorkflowLifecycle } from "./lifecycle";
 
 const prefix = "/__backend/workflow";
 const stages = ["intake", "research", "implementation", "verification", "delivery", "done"];
@@ -12,24 +14,60 @@ const reportProperties = {
   stage: { type: "string", enum: stages },
   status: { type: "string", enum: ["running", "waiting", "blocked", "completed"] },
   summary: { type: "string", maxLength: 8000 },
+  issue: { type: "object", additionalProperties: false, required: ["number"], properties: { number: { type: "integer", minimum: 1, maximum: 100000000 } } },
+  project: { type: "string", minLength: 1, maxLength: 100 },
+  deliveries: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
+    required: ["repo", "pr", "base", "release"], properties: {
+      repo: { type: "string", pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", maxLength: 200 },
+      pr: { type: "integer", minimum: 1 }, base: { type: "string", enum: ["dev", "master", "main"] },
+      release: { type: "string", enum: ["master", "main"] },
+    } } },
+  worktrees: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
+    required: ["repo", "path", "branch", "head"], properties: {
+      repo: { type: "string", minLength: 1, maxLength: 1000 }, path: { type: "string", minLength: 1, maxLength: 1000 },
+      branch: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]*$", maxLength: 200 },
+      head: { type: "string", pattern: "^[a-f0-9]{40}$" },
+    } } },
+  resources: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
+    required: ["kind", "task", "lease"], properties: {
+      kind: { type: "string", enum: ["bbdev-lease", "bedrock-client"] },
+      task: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$", maxLength: 200 },
+      lease: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$", maxLength: 200 },
+      slot: { type: "integer", minimum: 1, maximum: 4 },
+    } } },
   evidence: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false,
     required: ["label", "value"], properties: { label: { type: "string", maxLength: 200 },
       value: { type: "string", maxLength: 4000 }, url: { type: "string", pattern: "^https://", maxLength: 2000 } } } },
 };
 
 export async function registerWorkflow(app: FastifyInstance) {
-  const cwd = process.env.CODEX_WORKFLOW_CWD;
-  if (!cwd) return;
+  const configuredCwd = process.env.CODEX_WORKFLOW_CWD;
+  if (!configuredCwd) return;
+  const cwd: string = configuredCwd;
   const directory = path.resolve(process.env.CODEX_WORKFLOW_DATA ?? path.join(process.env.CODEX_HOME!, "workflow"));
   const store = new WorkflowStore(directory);
+  const lifecycle = new WorkflowLifecycle(store, cwd);
   const agentToken = randomBytes(32).toString("hex");
   const endpoint = process.env.CODEX_WORKFLOW_LOCAL_URL + prefix;
   await fs.writeFile(path.join(directory, "service.json"), JSON.stringify({ endpoint, agentToken }), { mode: 0o600 });
   const allowedOrigins = new Set((process.env.CODEX_WORKFLOW_ORIGINS ?? "").split(",").filter(Boolean));
-  const locks = new Set<string>();
   let polling = false;
   let notificationConnection: any, unsubscribe: (() => void) | undefined;
+  let refreshing: Promise<void> | undefined;
+  function refreshAll(includeImported = false) {
+    if (refreshing) return;
+    refreshing = (async () => {
+      await importProjectThreads(store, cwd, directory);
+      const tasks = store.list().filter(task => !task.archivedAt && (task.managed || includeImported && task.issue));
+      let index = 0;
+      await Promise.all(Array.from({ length: 3 }, async () => {
+        while (index < tasks.length) await lifecycle.reconcile(tasks[index++]!.id);
+      }));
+    })().catch(error => app.log.error(error)).finally(() => { refreshing = undefined; });
+  }
   async function sameOrigin(request: FastifyRequest, reply: any) {
+    const supplied = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
+    if (supplied.length === agentToken.length && timingSafeEqual(Buffer.from(supplied), Buffer.from(agentToken))) return;
     const origin = request.headers.origin;
     const localOrigin = `http://${request.headers.host}`;
     if (origin && (origin === localOrigin || allowedOrigins.has(origin))) return;
@@ -49,8 +87,8 @@ export async function registerWorkflow(app: FastifyInstance) {
     const existing = store.list().find(task => task.threadId === threadId);
     if (existing) return JSON.parse(await fs.readFile(path.join(directory, "contexts", existing.id + ".json"), "utf8"));
     const thread = await workflowHost().getLocalAppServerClient().readThread(threadId, { includeTurns: false });
-    if (path.resolve(thread.cwd).toLowerCase() !== path.resolve(cwd).toLowerCase()) return reply.code(400).send({ error: "当前会话不在工作流项目目录中" });
-    const { task, token } = store.create("thread:" + threadId, { title: thread.name ?? thread.preview?.slice(0, 120) ?? "EaseCation 工作", kind: "improvement", prompt: thread.preview ?? "", cwd });
+    if (!within(cwd, thread.cwd)) return reply.code(400).send({ error: "当前会话不在工作流项目目录中" });
+    const { task, token } = store.create("thread:" + threadId, { title: thread.name ?? thread.preview?.slice(0, 120) ?? "EaseCation 工作", kind: "improvement", prompt: thread.preview ?? "", cwd: thread.cwd });
     store.update(task.id, { threadId, status: "running", runtime: thread.status?.type ?? "unknown" }, "attached");
     const context = { workflowId: task.id, endpoint, token };
     await fs.mkdir(path.join(directory, "contexts"), { recursive: true });
@@ -91,38 +129,34 @@ export async function registerWorkflow(app: FastifyInstance) {
   } } }, async (request, reply) => {
     const id = request.params.id;
     if (!store.validToken(id, request.headers.authorization?.replace(/^Bearer /, "") ?? "")) return reply.code(403).send({ error: "工作流上报凭据无效" });
+    if (lifecycle.isBusy(id)) return reply.code(409).send({ error: "正在核对交付与资源，请稍后上报" });
     const report = request.body as any;
     if ((report.status === "completed" || report.stage === "done") && !report.summary?.trim()) return reply.code(400).send({ error: "完成时请填写结果摘要" });
-    return store.update(id, report, "progress");
+    const previous = store.get(id)!;
+    if (previous.archivedAt || previous.cleanup.state === "released" && (report.worktrees || report.resources || report.deliveries)) return reply.code(409).send({ error: "资源已收尾，请在新事项中登记后续工作" });
+    if (report.worktrees?.some((worktree: any) => !within(cwd, worktree.path) || !within(cwd, worktree.repo))) return reply.code(400).send({ error: "工作区须位于工作流项目目录内" });
+    if (report.issue) {
+      const base = process.env.CODEX_WORKFLOW_ISSUE_URL;
+      if (!base) return reply.code(503).send({ error: "事项入口尚未配置" });
+      const url = new URL(base); url.searchParams.set("issue", String(report.issue.number));
+      report.issue.url = url.href;
+    }
+    if (report.deliveries) report.deliveries = report.deliveries.map((d: any) => ({ ...d, url: `https://github.com/${d.repo}/pull/${d.pr}` }));
+    if (report.resources) report.resources = report.resources.map((resource: any) => ({ ...resource, released: false }));
+    const updated = store.update(id, { ...report, managed: true }, "progress");
+    void lifecycle.reconcile(id).catch(error => app.log.error(error));
+    return updated;
   });
-  app.post<{ Params: { id: string } }>(prefix + "/:id/message", { preHandler: sameOrigin,
-    schema: { body: { type: "object", additionalProperties: false, required: ["text", "requestKey"], properties: {
-      text: { type: "string", minLength: 1, maxLength: 32000 }, requestKey: { type: "string", format: "uuid" },
-    } } },
-  }, async (request, reply) => {
-    const id = request.params.id, task = store.get(id);
-    if (!task?.threadId) return reply.code(409).send({ error: "会话尚未创建" });
-    if (locks.has(id)) return reply.code(409).send({ error: "消息正在发送" });
-    const input = request.body as { text: string; requestKey: string };
-    if (!input.text.trim()) return reply.code(400).send({ error: "请填写补充说明" });
-    const delivery = store.reserveMessage(input.requestKey, id, input.text);
-    if (delivery === "accepted") return { ok: true };
-    if (delivery) return reply.code(409).send({ error: "上次消息仍待确认，请在 Codex 中查看发送结果" });
-    locks.add(id);
-    try {
-      await workflowManager().sendFollowUpMessage(task.threadId, { prompt: input.text });
-      store.acceptMessage(input.requestKey);
-      store.update(id, { status: "running", error: null }, "message.sent");
-      return { ok: true };
-    } catch (error) { return reply.code(409).send({ error: (error as Error).message }); }
-    finally { locks.delete(id); }
+  app.post(prefix + "/refresh", { preHandler: sameOrigin }, async (_request, reply) => {
+    refreshAll(true);
+    return reply.code(202).send({ syncing: true });
   });
-  app.post<{ Params: { id: string } }>(prefix + "/:id/stop", { preHandler: sameOrigin }, async (request, reply) => {
-    const task = store.get(request.params.id);
-    if (!task?.threadId) return reply.code(409).send({ error: "会话尚未创建" });
-    await workflowManager().interruptConversation(task.threadId, "user-stop");
-    return store.update(task.id, { status: "waiting" }, "stopped");
-  });
+  for (const action of ["release", "archive"]) app.post<{ Params: { id: string } }>(prefix + "/:id/" + action,
+    { preHandler: sameOrigin }, async (request, reply) => {
+      if (!store.get(request.params.id)) return reply.code(404).send({ error: "工作流不存在" });
+      return lifecycle.reconcile(request.params.id);
+    });
+  let ticks = 0;
   const timer = setInterval(async () => {
     if (polling) return;
     polling = true;
@@ -136,14 +170,20 @@ export async function registerWorkflow(app: FastifyInstance) {
           if (task) store.update(task.id, { plan: message.params.plan }, "plan.updated");
         });
       }
-      for (const task of store.list().filter(task => task.threadId)) {
+      for (const task of store.list().filter(task => task.threadId && !task.archivedAt)) {
         try {
+          if (!task.managed && task.runtime !== "unknown" && !workflowManager().getConversation(task.threadId!)) continue;
           const snapshot = await workflowSnapshot(task.threadId!);
           store.update(task.id, snapshot);
         } catch { /* Native host reconnects without resuming unrelated chats. */ }
       }
+      if (++ticks % 15 === 0) {
+        refreshAll();
+      }
     } finally { polling = false; }
-  }, 2000);
+  }, 10000);
+  await importProjectThreads(store, cwd, directory);
   timer.unref();
-  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); store.close(); });
+  refreshAll(true);
+  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await lifecycle.drain(); store.close(); });
 }

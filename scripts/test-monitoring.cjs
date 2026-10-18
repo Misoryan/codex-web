@@ -15,7 +15,7 @@ const logs = path.join(candidate, 'logs-' + Date.now());
 const secret = 'monitor-secret-message-file-token';
 
 function connect(origin, params, options) {
-  const socket = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/ipc?' + new URLSearchParams(params), options);
+  const socket = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/native/ipc?' + new URLSearchParams(params), options);
   const frames = [];
   socket.on('message', raw => { frames.push(JSON.parse(String(raw))); socket.emit('frame'); });
   socket.on('error', () => {});
@@ -89,7 +89,7 @@ async function main() {
     owner.isDestroyed = () => false;
     owner.on('will-attach-webview', (_event, preferences) => { preferences.session = {}; });
     const guest = await handlers.get('codex-web:attach-browser')({sender: owner}, {partition: 'monitor-fixture', 'data-browser-sidebar-browser-tab-id': 'fixture', 'data-browser-sidebar-conversation-id': 'fixture'});
-    const stream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/browser-stream?token=' + guest.token);
+    const stream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/native/browser-stream?token=' + guest.token);
     sockets.push(stream);
     await once(stream, 'message');
     stream.send(JSON.stringify({type: 'view', visible: true, width: 320, height: 240}));
@@ -98,7 +98,7 @@ async function main() {
     stream.close(1000, 'Document closed');
     await once(stream, 'close');
     handlers.get('codex-web:close-browser')({sender: owner}, guest.token);
-    const rejectedStream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/browser-stream?token=' + secret);
+    const rejectedStream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/native/browser-stream?token=' + secret);
     rejectedStream.on('error', () => {});
     await new Promise(resolve => rejectedStream.once('close', resolve));
 

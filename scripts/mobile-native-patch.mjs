@@ -60,15 +60,6 @@ export function patchMobileHistoryNavigation(source) {
   });
 }
 
-export function patchMobileNavigationFooter(source) {
-  return replaceFunction(source, 'D2o', body => {
-    if (body.includes('CODEX_WEB_MOBILE_ACCOUNT_FOOTER')) return body;
-    const anchor = '  let U;\n  return (';
-    if (body.split(anchor).length !== 2) throw Error('Native navigation footer changed');
-    return body.replace(anchor, '  if (matchMedia("(max-width: 768px)").matches) return (0, O2.jsx)(`div`, {"data-codex-mobile-account-footer": true, children: O}); /* CODEX_WEB_MOBILE_ACCOUNT_FOOTER */\n' + anchor);
-  });
-}
-
 export function patchSidebarPagination(source) {
   source = replaceFunction(source, '_Po', body => {
     if (body.includes('data-codex-web-pagination')) return body;

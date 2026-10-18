@@ -539,11 +539,11 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     const requestUrl = request.url ?? "/";
     const host = request.headers.host ?? "localhost";
     const url = new URL(requestUrl, `http://${host}`);
-    if (url.pathname === "/__backend/browser-stream") {
+    if (url.pathname === "/__backend/native/browser-stream") {
       browserStreamUpgrade(request, socket, head);
       return;
     }
-    if (url.pathname !== "/__backend/ipc") {
+    if (url.pathname !== "/__backend/native/ipc") {
       monitoring.event("ws.rejected", { ...requestFields(request), reason: "unknown_route" });
       socket.destroy();
       return;

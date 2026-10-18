@@ -179,7 +179,7 @@ export class ResumableBridge {
     });
     if (this.epoch) params.set("epoch", this.epoch);
     const socket = new WebSocket(
-      `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/__backend/ipc?${params}${this.query}`,
+      `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/__backend/native/ipc?${params}${this.query}`,
     );
     this.socket = socket;
     this.armWatchdog(socket, "Handshake timeout");

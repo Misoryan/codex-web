@@ -295,6 +295,7 @@ function shouldCloseSidebarForMemoryPath(path: string): boolean {
   return (
     path === "/" ||
     path.startsWith("/local/") ||
+    path.startsWith("/mcp-app/") ||
     path === "/skills" ||
     path === "/automations" ||
     path === "/settings" ||

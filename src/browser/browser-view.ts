@@ -90,7 +90,7 @@ export function installBrowserView(invoke: Invoke): void {
           this.token = result.token;
         }
         if (!this.isConnected) { await invoke("codex-web:close-browser", this.token); this.token = undefined; return; }
-        const url = new URL("/__backend/browser-stream", location.href);
+        const url = new URL("/__backend/native/browser-stream", location.href);
         url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
         url.searchParams.set("token", this.token);
         const socket = this.socket = new WebSocket(url);

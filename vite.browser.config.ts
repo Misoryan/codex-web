@@ -29,7 +29,7 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 4173,
     proxy: {
-      "/__backend/ipc": {
+      "/__backend/native/ipc": {
         target: `ws://127.0.0.1:8214`,
         changeOrigin: true,
         ws: true,
