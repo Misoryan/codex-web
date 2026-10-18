@@ -8,6 +8,7 @@ import {promisify} from 'node:util';
 import yauzl from 'yauzl';
 import {extractAll} from '@electron/asar';
 import sharp from 'sharp';
+import {patchWorkflowHost} from './workflow-host-patch.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 process.chdir(root);
@@ -103,4 +104,5 @@ run(process.execPath, ['node_modules/prettier/bin/prettier.cjs', '--ignore-path'
 for (const name of patches) run('git', ['apply', '--no-index', '--unsafe-paths', '--directory=scratch/asar', `patches/${name}.patch`]);
 await fs.rm('scratch/asar/node_modules/better-sqlite3', {recursive: true});
 for (const file of ['scripts/app-tools-patch.cjs', 'scripts/bundle-browser-runtime.cjs', 'scripts/patch-webview.mjs']) run(process.execPath, [file]);
+await patchWorkflowHost();
 console.log(`Prepared Codex Desktop ${desktop.version}`);

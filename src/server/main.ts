@@ -24,6 +24,7 @@ import { RendererSessions } from "./renderer-sessions";
 import { StatsigCache } from "./statsig-cache";
 import { PersistedStateEncoder } from "../shared/persisted-state-wire";
 import { registerSub2ApiUsage } from "./sub2api-usage";
+import { registerWorkflow } from "./workflow/routes";
 import { MonitoringDestination, ServerMonitoring, installHttpMonitoring, requestFields, errorFields, identity } from "./observability";
 
 type ServerOptions = {
@@ -453,6 +454,7 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     return reply.code(204).send();
   });
   await registerSub2ApiUsage(app);
+  await registerWorkflow(app);
   const websocketServer = new WebSocketServer({
     noServer: true,
     // Desktop sends multi-megabyte feature snapshots at startup. Use the
@@ -784,6 +786,7 @@ async function startIpcBridgeServer(options: ServerOptions): Promise<void> {
   };
 
   // The upstream entrypoint initializes network policy and starts the app once.
+  if (process.env.CODEX_WORKFLOW_CWD) process.env.CODEX_APP_SERVER_MANAGER_IN_MAIN = "1";
   require(path.resolve(__dirname, "../../scratch/asar", packageJson.main));
 }
 
