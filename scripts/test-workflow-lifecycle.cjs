@@ -723,6 +723,15 @@ scenario('手动归档等待远端回收确认，失败不归档并支持重新�
   assert.equal(archived.length,1);assert.equal(result.stage,task.stage);
 });
 
+scenario('手动归档保留其他空闲事项仍关联的工作区', async () => {
+  const store=storeFixture(),fixture=worktreeFixture(),threadId=threadFixture(fixture.target);
+  const {task}=makeTask(store,{managed:false,threadId,cwd:fixture.target,worktrees:[fixture.worktree],deliveries:[deliveryFixture(1,'MERGED',false,fixture.head)]});
+  makeTask(store,{managed:false,threadId:threadFixture(fixture.target),cwd:fixture.target});
+  await assert.rejects(new WorkflowLifecycle(store,scenarioRoot).archiveAndClean(task.id),/其他事项关联/);
+  assert(fs.existsSync(fixture.target));assert.equal(git(fixture.repo,'rev-parse','feature-fixture'),fixture.head);
+  assert.equal(archived.length,0);assert.equal(store.get(task.id).archivedAt,null);
+});
+
 async function waitForReconciliation(id, after) {
   const deadline=Date.now()+45000;
   let observed;

@@ -151,6 +151,12 @@ export class WorkflowLifecycle {
       let task = this.store.get(id)!;
       if (task.archivedAt) return task;
       if (!task.threadId) throw Error("事项尚未关联会话");
+      const shared = this.store.list().some(other => other.id !== id && !other.archivedAt && (
+        task.worktrees.some(worktree => !worktree.releasedAt && (within(worktree.path, other.cwd) ||
+          other.worktrees.some(value => !value.releasedAt && path.resolve(value.path).toLowerCase() === path.resolve(worktree.path).toLowerCase()))) ||
+        task.remoteWorktrees?.some(worktree => worktree.cleanup.state !== "cleaned" && other.remoteWorktrees?.some(value =>
+          value.cleanup.state !== "cleaned" && value.host === worktree.host && value.task === worktree.task && value.path === worktree.path))));
+      if (shared) throw Error("工作区仍被其他事项关联，保留工作区与会话");
       await this.assertIdle(task, undefined, true);
       await refreshRemoteWorktrees(this.store, id, true);
       task = this.store.get(id)!;
