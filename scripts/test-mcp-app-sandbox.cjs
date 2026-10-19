@@ -15,6 +15,13 @@ const { chromium } = require('playwright-core');
     const result = await app.callServerTool({name:'read_fixture',arguments:{id:42}});
     document.querySelector('#result').textContent=result.content[0].text;
     document.querySelector('button').onclick=()=>app.openLink({url:'codex://threads/00000000-0000-4000-8000-000000000042'});
+    document.querySelector('#create').onsubmit=async event=>{
+      event.preventDefault();
+      await app.callServerTool({name:'create_fixture',arguments:{title:document.querySelector('input').value}});
+      document.querySelector('#submitted').textContent=String(++window.submissions);
+    };
+    window.submissions=0;
+    document.addEventListener('securitypolicyviolation',event=>{if(event.violatedDirective==='form-action')document.body.dataset.formBlocked='true'});
   ` } });
   const server = http.createServer((req, res) => {
     if (req.url === '/host.js') { res.setHeader('Content-Type', 'text/javascript'); return res.end(host.outputFiles[0].text); }
@@ -25,7 +32,7 @@ const { chromium } = require('playwright-core');
   try {
     const page = await browser.newPage();
     await page.goto('http://127.0.0.1:' + server.address().port);
-    const appHtml = '<main id="result">Loading</main><button>Open conversation</button><script type="module">' + app.outputFiles[0].text.replaceAll('</script', '<\\/script') + '</script>';
+    const appHtml = '<main id="result">Loading</main><button>Open conversation</button><form id="create"><input required name="title"><button type="submit">Create fixture</button></form><output id="submitted"></output><form id="native" action="/blocked-form"><button>Native form</button></form><script type="module">' + app.outputFiles[0].text.replaceAll('</script', '<\\/script') + '</script>';
     await page.evaluate(async html => {
       const { connect } = await import('/host.js');
       const controller = new AbortController();
@@ -51,14 +58,28 @@ const { chromium } = require('playwright-core');
     assert.equal(request.method, 'tools/call');
     assert.equal(request.params.name, 'read_fixture');
     assert.deepEqual(request.params.arguments, { id: 42 });
-    assert.equal(await page.locator('iframe').getAttribute('sandbox'), 'allow-scripts');
+    assert.equal(await page.locator('iframe').getAttribute('sandbox'), 'allow-scripts allow-forms');
     assert.equal(await frame.locator('body').evaluate(() => { try { return window.parent.document.body.tagName; } catch { return 'isolated'; } }), 'isolated');
     await page.evaluate(() => window.fixtureApi.setTheme({ theme: 'dark' }));
     await frame.locator('body[data-theme="dark"]').waitFor();
     await frame.getByRole('button', { name: 'Open conversation' }).click();
     await page.waitForFunction(() => window.fixtureNavigation === '/local/00000000-0000-4000-8000-000000000042');
+    await frame.getByRole('button', { name: 'Create fixture' }).click();
+    assert.equal(await frame.locator('#submitted').textContent(), '');
+    await frame.locator('input').fill('Fixture work');
+    await frame.getByRole('button', { name: 'Create fixture' }).click();
+    await frame.locator('#submitted').filter({hasText:'1'}).waitFor();
+    const submitted = await page.evaluate(()=>window.fixtureRequest);
+    assert.equal(submitted.method, 'tools/call');
+    assert.equal(submitted.params.name, 'create_fixture');
+    assert.deepEqual(submitted.params.arguments, {title:'Fixture work'});
+    await frame.locator('input').press('Enter');
+    await frame.locator('#submitted').filter({hasText:'2'}).waitFor();
+    await frame.getByRole('button', { name: 'Native form' }).click();
+    await frame.locator('body[data-form-blocked="true"]').waitFor();
+    await frame.locator('#result').filter({hasText:'Fixture item 42'}).waitFor();
     await page.evaluate(() => window.fixtureController.abort());
     assert.equal(await page.locator('iframe').getAttribute('srcdoc'), null);
-    console.log('MCP app browser boundary: SDK tool call, opaque isolation, host theme, native conversation navigation and teardown passed');
+    console.log('MCP app browser boundary: SDK tool calls, validated click and Enter submission, blocked form navigation, opaque isolation, host theme, native conversation navigation and teardown passed');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

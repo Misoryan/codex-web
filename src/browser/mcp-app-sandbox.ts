@@ -18,7 +18,7 @@ export function connect({ webview, signal, hostApiHandlers: host }: Connection) 
   return {
     async *runWidgetCode(args: Json) {
       signal.throwIfAborted();
-      webview.setAttribute("sandbox", "allow-scripts");
+      webview.setAttribute("sandbox", "allow-scripts allow-forms");
       webview.referrerPolicy = "no-referrer";
       const resources = (args.csp?.resourceDomains ?? []).join(" ");
       const connections = (args.csp?.connectDomains ?? []).join(" ");
