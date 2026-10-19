@@ -4,6 +4,7 @@ import { randomUUID, randomBytes, createHash } from "node:crypto";
 
 const Database = require("better-sqlite3");
 export type Delivery = { repo: string; pr: number; url: string; base: string; release: string;
+  state?: "OPEN" | "CLOSED" | "MERGED"; isDraft?: boolean; checkedAt?: string;
   head?: string; merge?: string; devMergedAt?: string; masterMergedAt?: string; error?: string };
 export type Worktree = { repo: string; path: string; branch: string; head: string;
   removalStartedAt?: string; removedAt?: string; releasedAt?: string };

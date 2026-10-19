@@ -76,7 +76,7 @@ function threadFixture(cwd, runtime = 'idle', pending = 0) {
 }
 function deliveryFixture(pr = 1, state = 'OPEN', release = false, head = 'a'.repeat(40)) {
   const repo = 'fixture/workflow', merge = String(pr).padStart(40, '0');
-  github.set(`${repo}#${pr}`, {pr: {state, baseRefName: 'dev', headRefOid: head,
+  github.set(`${repo}#${pr}`, {pr: {state, isDraft: false, baseRefName: 'dev', headRefOid: head,
     mergeCommit: state === 'MERGED' ? {oid: merge} : null, mergedAt: state === 'MERGED' ? '2026-01-02T03:04:05Z' : null,
     url: `https://github.com/${repo}/pull/${pr}`}});
   github.set(`repos/${repo}/compare/${merge}...dev`, {status: 'ahead'});
@@ -483,6 +483,47 @@ scenario('已确认 master 完成后 GitHub 暂不可读，只读 Möbius 当前
   result = await reconcile(store, task.id, false);
   assert.equal(result.mobius.status, 'DONE'); assert.equal(result.mobius.desired, null);
   assert.deepEqual(helperCalls().map(call => call.desired), ['DONE', null]);
+});
+
+for (const isDraft of [false,true]) scenario(`HTTP 登记${isDraft?'草稿':'普通'} dev PR 后，即使仍在实现阶段也同步待测试并保存核验证据`, async () => {
+  const app=require('fastify')(), id=threadFixture(scenarioRoot);
+  const delivery=deliveryFixture(1,'OPEN');
+  github.get('fixture/workflow#1').pr.isDraft=isDraft;
+  try {
+    await registerWorkflow(app);
+    const service=JSON.parse(fs.readFileSync(path.join(process.env.CODEX_WORKFLOW_DATA,'service.json'),'utf8'));
+    const attached=await app.inject({method:'POST',url:prefix+'/attach',headers:{authorization:'Bearer '+service.agentToken},payload:{threadId:id}});
+    assert.equal(attached.statusCode,200,attached.body);
+    const context=attached.json();
+    const response=await app.inject({method:'POST',url:prefix+'/'+context.workflowId+'/report',headers:{authorization:'Bearer '+context.token},
+      payload:{stage:'implementation',issue:{number:110},deliveries:[delivery],summary:'Development PR created'}});
+    assert.equal(response.statusCode,200,response.body);
+    await waitFor(async ()=>(await app.inject(prefix+'/'+context.workflowId)).json().mobius.status==='READY_FOR_TEST');
+    const result=(await app.inject(prefix+'/'+context.workflowId)).json();
+    assert.equal(result.stage,'implementation');assert.equal(result.deliveries[0].state,'OPEN');assert.equal(result.deliveries[0].isDraft,isDraft);
+    assert(Number.isFinite(Date.parse(result.deliveries[0].checkedAt)));
+    assert.equal(result.deliveries[0].devMergedAt,undefined);assert.equal(result.deliveries[0].masterMergedAt,undefined);
+    assert.equal(result.cleanup.state,'none');assert.equal(result.archivedAt,null);assert.equal(archived.length,0);
+    assert(githubCalls.some(args=>args[0]==='pr'&&args[6].split(',').includes('isDraft')));
+  } finally {await app.close();}
+});
+
+for (const condition of ['closed','unavailable','incomplete','wrong-base']) scenario(`已登记 PR 的 ${condition} 证据不能由验收阶段推进 Möbius，也不能完成或归档`, async () => {
+  const store=storeFixture(),id=threadFixture(scenarioRoot);
+  const delivery=deliveryFixture(1,'OPEN');
+  if(condition==='closed') github.get('fixture/workflow#1').pr.state='CLOSED';
+  if(condition==='unavailable') github.set('fixture/workflow#1',{pr:Error('Fixture GitHub unavailable')});
+  if(condition==='incomplete') delete github.get('fixture/workflow#1').pr.isDraft;
+  if(condition==='wrong-base') github.get('fixture/workflow#1').pr.baseRefName='master';
+  const {task}=makeTask(store,{threadId:id,stage:'verification',issue:{number:111,url:'https://issues.example.invalid/111'},
+    deliveries:[{...delivery,devMergedAt:'2026-01-01T00:00:00Z',masterMergedAt:'2026-01-01T00:00:00Z'}]});
+  const result=await reconcile(store,task.id);
+  assert.equal(result.mobius.desired,null);assert.equal(result.mobius.status,'IN_PROGRESS');assert.equal(helperCalls()[0].desired,null);
+  assert.equal(result.deliveries[0].devMergedAt,undefined);assert.equal(result.deliveries[0].masterMergedAt,undefined);
+  assert(Number.isFinite(Date.parse(result.deliveries[0].checkedAt)));
+  if(condition==='closed') assert.equal(result.deliveries[0].state,'CLOSED');
+  else assert.match(result.deliveries[0].error,/暂时无法核对/);
+  assert.equal(result.cleanup.state,'none');assert.equal(result.archivedAt,null);assert.equal(archived.length,0);
 });
 
 scenario('HTTP 上报凭据、范围和元数据登记边界；刷新实际执行 Möbius 同步', async () => {

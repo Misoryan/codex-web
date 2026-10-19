@@ -8,9 +8,11 @@ import { refreshRemoteWorktrees } from "./remote-worktrees";
 export function desiredIssueStatus(task: Workflow) {
   if (task.deliveries.some(delivery => delivery.error)) return null;
   if (task.deliveries.length) {
-    if (task.deliveries.every(delivery => delivery.masterMergedAt)) return "DONE";
-    if (task.deliveries.every(delivery => delivery.devMergedAt)) return "READY_FOR_RELEASE";
-    if (task.stage === "done") return "READY_FOR_TEST";
+    if (task.deliveries.some(delivery => !delivery.checkedAt || !delivery.state || typeof delivery.isDraft !== "boolean" || delivery.state === "CLOSED")) return null;
+    if (task.deliveries.every(delivery => delivery.state === "MERGED" && delivery.masterMergedAt)) return "DONE";
+    if (task.deliveries.every(delivery => delivery.state === "MERGED" && delivery.devMergedAt)) return "READY_FOR_RELEASE";
+    if (task.deliveries.some(delivery => delivery.state === "OPEN" && delivery.base === "dev")) return "READY_FOR_TEST";
+    return null;
   } else if (task.stage === "done" && task.kind === "research" && task.status === "completed") return "DONE";
   if (["verification", "delivery"].includes(task.stage)) return "READY_FOR_TEST";
   if (task.status === "blocked") return "BLOCKED";
@@ -135,7 +137,7 @@ export class WorkflowLifecycle {
       const deliveries = [];
       for (const delivery of task.deliveries) {
         try { deliveries.push(await inspectDelivery(delivery)); }
-        catch { deliveries.push({ repo: delivery.repo, pr: delivery.pr, url: delivery.url, base: delivery.base, release: delivery.release, error: "GitHub 交付记录暂时无法核对" }); }
+        catch { deliveries.push({ repo: delivery.repo, pr: delivery.pr, url: delivery.url, base: delivery.base, release: delivery.release, checkedAt: new Date().toISOString(), error: "GitHub 交付记录暂时无法核对" }); }
       }
       task = this.store.update(id, { deliveries }, "delivery.checked");
       await this.syncIssue(task);
