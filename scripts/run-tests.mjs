@@ -13,7 +13,9 @@ const tests = process.argv.includes('--desktop') ? [
 ];
 for (const test of tests) {
   console.log(`\n${test}`);
-  const result = spawnSync(process.execPath, ['scripts/' + test], {stdio: 'inherit', windowsHide: true});
+  const result = spawnSync(process.execPath, ['scripts/' + test], {
+    stdio: 'inherit', windowsHide: true, env: {...process.env, CODEX_WORKFLOW_OBSERVER_IPC_URLS: ''},
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status || 1);
 }
