@@ -1,5 +1,7 @@
 import type { Workflow } from "./store";
 import path from "node:path";
+import { RuntimeReader, readLoadedRuntime, runtimeState } from "./runtime-reader";
+import type { RuntimeBatch, RuntimeState } from "./runtime-reader";
 
 export function workflowHost() { return (globalThis as any).__codexWorkflowHost; }
 export function workflowManager() {
@@ -39,26 +41,48 @@ export async function createWorkflowThread(task: Workflow, prompt: string, onCre
   return result;
 }
 
-export async function workflowSnapshot(id: string) {
+let observers: RuntimeReader[] | undefined;
+function runtimeObservers() {
+  return observers ??= (process.env.CODEX_WORKFLOW_OBSERVER_IPC_URLS ?? "").split(",").map(url => url.trim()).filter(Boolean).map(url => new RuntimeReader(url));
+}
+export function closeRuntimeObservers() { observers?.forEach(observer => observer.close()); observers = undefined; }
+
+function conversationDetails(id: string) {
   const manager = workflowManager();
   const conversation = manager.getConversation(id);
-  if (!conversation) {
-    const client = workflowHost().getLocalAppServerClient();
-    let thread = await client.readThread(id, { includeTurns: false });
-    if (thread.status?.type === "notLoaded") {
-      thread = await client.readThread(id, { includeTurns: true });
-      if (thread.status?.type !== "notLoaded") return { runtime: thread.status?.type ?? "unknown" };
-      const last = thread.turns?.at(-1);
-      return { runtime: last?.status ?? "unknown" };
-    }
-    return { runtime: thread.status?.type ?? "unknown" };
-  }
+  if (!conversation) return {};
   const turns = conversation.turnHistory?.kind === "canonical"
     ? conversation.turnHistory.history.islands.flatMap((island: any) => island.entries.map((entry: any) => conversation.turnHistory.history.entitiesByKey[entry.value]))
     : conversation.turns;
   const lastTurn = turns?.at(-1);
   const messages = lastTurn?.items?.filter((item: any) => item.type === "agentMessage");
-  return { runtime: conversation.threadRuntimeStatus?.type ?? lastTurn?.status ?? "idle",
-    lastMessage: messages?.at(-1)?.text?.slice(-24000) ?? "",
-    pending: conversation.requests?.length ?? 0 };
+  return { lastMessage: messages?.at(-1)?.text?.slice(-24000) ?? "", pending: conversation.requests?.length ?? 0 };
 }
+
+export async function workflowSnapshots(ids: readonly string[]) {
+  const client = workflowHost().getLocalAppServerClient();
+  const deadline = <T>(work: Promise<T>) => new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error("Native runtime read timed out")), 5000);
+    work.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
+  const batches: RuntimeBatch[] = await Promise.all([
+    readLoadedRuntime(ids, (method, params) => deadline(client.sendAppServerRequest(method, params))),
+    ...runtimeObservers().map(observer => observer.snapshot(ids)),
+  ]);
+  const result = new Map<string, RuntimeState & { runtimeCheckedAt: string; lastMessage?: string }>();
+  for (const id of ids) {
+    const observed = batches.map(batch => batch.states.get(id)).filter((state): state is RuntimeState => Boolean(state));
+    const active = observed.filter(state => state.runtime === "active");
+    const known = observed.find(state => !["unknown", "notLoaded"].includes(state.runtime));
+    let state: RuntimeState;
+    if (active.length) state = { runtime: "active", activeFlags: [...new Set(active.flatMap(state => state.activeFlags))], pending: Math.max(...active.map(state => state.pending)) };
+    else if (batches.some(batch => !batch.available) || observed.some(state => state.runtime === "unknown")) state = runtimeState(null);
+    else if (known) state = known;
+    else state = runtimeState({ type: batches.every(batch => batch.available) && observed.every(state => state.runtime !== "unknown") ? "notLoaded" : "unknown" });
+    const details = conversationDetails(id);
+    result.set(id, { ...details, ...state, pending: ["active", "idle"].includes(state.runtime) ? Math.max(state.pending, details.pending ?? 0) : state.pending, runtimeCheckedAt: new Date().toISOString() });
+  }
+  return result;
+}
+
+export async function workflowSnapshot(id: string) { return (await workflowSnapshots([id])).get(id)!; }

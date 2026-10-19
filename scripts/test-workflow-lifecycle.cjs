@@ -133,6 +133,13 @@ function resetScenario() {
       },
     }}})},
     getLocalAppServerClient: () => ({
+      async sendAppServerRequest(method, params) {
+        if (method === 'thread/loaded/list') return {data: [...nativeThreads.values()].filter(t => t.status?.type !== 'notLoaded').map(t => t.id), nextCursor: null};
+        assert.equal(method, 'thread/read'); assert.equal(params.includeTurns, false);
+        assert(nativeThreads.has(params.threadId));
+        nativeReadCalls.push({id: params.threadId, includeTurns: false});
+        return {thread: nativeThreads.get(params.threadId)};
+      },
       async readThread(id, options) {
         assert(nativeThreads.has(id), 'Only fixture threads may be read');
         nativeReadCalls.push({id, includeTurns: options?.includeTurns});
@@ -304,31 +311,15 @@ for (const condition of ['running', 'approval', 'other-native-chat']) scenario(`
   assert(fs.existsSync(fixture.target)); assert.equal(git(fixture.repo, 'rev-parse', 'feature-fixture'), fixture.head);
 });
 
-scenario('未加载会话最后一轮已完成，读取历史确认后可释放并归档', async () => {
+scenario('未加载会话最后一轮已完成，仍不能以历史结果授权释放及归档', async () => {
   const store = storeFixture(), fixture = worktreeFixture(), id = threadFixture(fixture.target, 'notLoaded');
   conversations.delete(id);
   nativeFullThreads.set(id, {...nativeThreads.get(id), turns: [{status: 'completed', items: []}]});
   const {task} = makeTask(store, {threadId: id, deliveries: [deliveryFixture(1, 'MERGED', true, fixture.head)], worktrees: [fixture.worktree]});
   const result = await reconcile(store, task.id);
-  assert.equal(result.cleanup.state, 'released', result.cleanup.reason); assert(!fs.existsSync(fixture.target));
-  assert(result.archivedAt); assert.equal(archived.length, 1);
-  assert(nativeReadCalls.some(call => call.id === id && call.includeTurns === true));
-});
-
-for (const condition of ['active', 'approval', 'unfinished', 'unknown']) scenario(`未加载会话历史回读为 ${condition} 时保留工作区并禁止归档`, async () => {
-  const store = storeFixture(), fixture = worktreeFixture(), id = threadFixture(fixture.target, 'notLoaded');
-  conversations.delete(id);
-  nativeFullThreads.set(id, {...nativeThreads.get(id),
-    status: condition === 'active' || condition === 'approval' ? {type: 'active', flags: condition === 'approval' ? ['waitingOnApproval'] : []} : {type: 'notLoaded'},
-    turns: condition === 'unknown' ? [] : [{status: condition === 'unfinished' ? 'inProgress' : 'completed', items: []}],
-  });
-  const {task} = makeTask(store, {threadId: id, deliveries: [deliveryFixture(1, 'MERGED', true, fixture.head)], worktrees: [fixture.worktree]});
-  const result = await reconcile(store, task.id);
-  assert.equal(result.cleanup.state, 'blocked', 'Historical completed turns must not override a current active or unknown state');
-  assert.match(result.cleanup.reason, /仍在运行或等待回应/); assert(fs.existsSync(fixture.target));
-  assert.equal(git(fixture.repo, 'rev-parse', 'feature-fixture'), fixture.head);
+  assert.equal(result.cleanup.state, 'blocked'); assert(fs.existsSync(fixture.target));
   assert.equal(result.archivedAt, null); assert.equal(archived.length, 0);
-  assert(nativeReadCalls.some(call => call.id === id && call.includeTurns === true));
+  assert(!nativeReadCalls.some(call => call.includeTurns === true));
 });
 
 scenario('master 查询失败不否定已核实的 dev 合入，可释放干净工作区但不能归档', async () => {

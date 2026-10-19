@@ -12,7 +12,7 @@ export type Workflow = {
   id: string; title: string; kind: string; prompt: string; cwd: string;
   threadId: string | null; stage: string; status: string; summary: string;
   evidence: { label: string; value: string; url?: string }[];
-  plan: { step: string; status: string }[]; runtime: string;
+  plan: { step: string; status: string }[]; runtime: string; activeFlags?: string[]; runtimeCheckedAt?: string;
   lastMessage: string; pending: number; error: string | null;
   createdAt: string; updatedAt: string;
   issue: { number: number; url: string } | null; project: string;

@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WorkflowStore } from "./store";
-import { createWorkflowThread, workflowHost, workflowManager, workflowSnapshot } from "./host";
+import { closeRuntimeObservers, createWorkflowThread, workflowHost, workflowManager, workflowSnapshots } from "./host";
 import { within, importProjectThreads } from "./indexer";
 import { WorkflowLifecycle } from "./lifecycle";
 
@@ -170,12 +170,12 @@ export async function registerWorkflow(app: FastifyInstance) {
           if (task) store.update(task.id, { plan: message.params.plan }, "plan.updated");
         });
       }
-      for (const task of store.list().filter(task => task.threadId && !task.archivedAt)) {
-        try {
-          if (!task.managed && task.runtime !== "unknown" && !workflowManager().getConversation(task.threadId!)) continue;
-          const snapshot = await workflowSnapshot(task.threadId!);
-          store.update(task.id, snapshot);
-        } catch { /* Native host reconnects without resuming unrelated chats. */ }
+      const tasks = store.list().filter(task => task.threadId && !task.archivedAt);
+      try {
+        const snapshots = await workflowSnapshots(tasks.map(task => task.threadId!));
+        for (const task of tasks) store.update(task.id, { ...snapshots.get(task.threadId!)!, updatedAt: store.get(task.id)!.updatedAt });
+      } catch {
+        for (const task of tasks) store.update(task.id, { runtime: "unknown", activeFlags: [], pending: 0, runtimeCheckedAt: new Date().toISOString(), updatedAt: store.get(task.id)!.updatedAt });
       }
       if (++ticks % 15 === 0) {
         refreshAll();
@@ -185,5 +185,5 @@ export async function registerWorkflow(app: FastifyInstance) {
   await importProjectThreads(store, cwd, directory);
   timer.unref();
   refreshAll(true);
-  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await lifecycle.drain(); store.close(); });
+  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await lifecycle.drain(); closeRuntimeObservers(); store.close(); });
 }
