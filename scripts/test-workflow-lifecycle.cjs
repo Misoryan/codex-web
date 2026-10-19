@@ -164,8 +164,8 @@ scenario('从当前 Codex SQLite 索引已有项目会话，排除空会话、�
   try {
     source.exec(`CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT, preview TEXT,
       first_user_message TEXT, cwd TEXT, source TEXT, updated_at INTEGER, project_id TEXT,
-      archived INTEGER, has_user_event INTEGER)`);
-    const insert = source.prepare('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+      archived INTEGER, has_user_event INTEGER, archived_at INTEGER)`);
+    const insert = source.prepare('INSERT INTO threads (id,name,title,preview,first_user_message,cwd,source,updated_at,project_id,archived,has_user_event) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
     const entries = [
       ['root-chat', 'Root task', scenarioRoot, 'cli', 'Mobius #321 synthetic requirement', 0],
       ['nested-chat', 'Nested task', path.join(scenarioRoot, 'project'), 'vscode', 'Synthetic feature requirement', 0],
@@ -209,6 +209,60 @@ scenario('从当前 Codex SQLite 索引已有项目会话，排除空会话、�
   assert.deepEqual(fs.readFileSync(sourceFile), before, 'Import must leave the source database unchanged');
   assert.deepEqual(nativeReadCalls, []);
   assert.deepEqual(archived, []);
+});
+
+scenario('既有事项跟随原生 SQLite 归档与取消归档，保留关联和资源且不导入历史归档', async () => {
+  const sourceFile = path.join(process.env.CODEX_HOME, 'state_5.sqlite');
+  function sourceWrite(run) {
+    const db = new Database(sourceFile);
+    try { run(db); } finally { db.close(); }
+  }
+  sourceWrite(db => {
+    db.exec(`CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, title TEXT, preview TEXT,
+      first_user_message TEXT, cwd TEXT, source TEXT, updated_at INTEGER, project_id TEXT,
+      archived INTEGER, archived_at INTEGER)`);
+    const insert = db.prepare('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    insert.run('tracked-chat', 'Original task', 'Original title', 'Original preview', 'Synthetic tracked requirement', scenarioRoot, 'cli', 1700000000, null, 0, null);
+    insert.run('historic-chat', 'Historic task', 'Historic title', '', 'Synthetic historical requirement', scenarioRoot, 'cli', 1699999000, null, 1, 1699999500);
+  });
+  const store = storeFixture(), directory = fixtureDirectory('archive-index');
+  await importProjectThreads(store, scenarioRoot, directory);
+  assert.deepEqual(store.list().map(task => task.threadId), ['tracked-chat']);
+  const original = store.list()[0];
+  store.update(original.id, {managed:true, project:'Curated project', issue:{number:501,url:'https://issues.example.invalid/501'},
+    summary:'Keep curated progress', stage:'verification', evidence:[{label:'acceptance',value:'Retain evidence'}],
+    deliveries:[{repo:'fixture/workflow',pr:31,url:'https://github.com/fixture/workflow/pull/31',base:'dev',release:'master'}],
+    worktrees:[{repo:scenarioRoot,path:path.join(scenarioRoot,'owned'),branch:'owned',head:'b'.repeat(40)}],
+    resources:[{kind:'bbdev-lease',task:'fixture-task',lease:'fixture-lease',released:false}],
+    customMetadata:{source:'reviewed',relatedIssues:[501,502]}});
+  const preserved = store.get(original.id);
+  const context = path.join(directory, 'contexts', original.id + '.json'), contextBefore = fs.readFileSync(context);
+  sourceWrite(db => {
+    db.prepare("UPDATE threads SET archived=1,archived_at=1700000100,updated_at=1700000200,name='Renamed elsewhere' WHERE id='tracked-chat'").run();
+    const insert = db.prepare('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    const fill = db.transaction(() => {
+      for (let i=0;i<1100;i++) insert.run('outside-'+i, 'Outside', '', '', 'Synthetic outside requirement', scenarioRoot+'-outside', 'cli', 1800000000+i, null, 0, null);
+    });
+    fill();
+  });
+  let before = fs.readFileSync(sourceFile);
+  await importProjectThreads(store, scenarioRoot, directory);
+  assert.deepEqual(store.get(original.id), {...preserved,archivedAt:'2023-11-14T22:15:00.000Z'},
+    'Native archive must hide the existing entry without losing business metadata, resources or progress time');
+  assert.equal(store.list().length,1,'Historical archived and outside conversations must not be imported');
+  assert.deepEqual(fs.readFileSync(sourceFile),before,'Archive observation must not write the native database');
+  const archivedTask = store.get(original.id), eventCount = store.db.prepare('SELECT count(*) AS count FROM events').get().count;
+  await importProjectThreads(store, scenarioRoot, directory);
+  assert.deepEqual(store.get(original.id),archivedTask);
+  assert.equal(store.db.prepare('SELECT count(*) AS count FROM events').get().count,eventCount,'Repeated archive observation must be idempotent');
+  sourceWrite(db => db.prepare("UPDATE threads SET archived=0,archived_at=NULL,updated_at=1700000300 WHERE id='tracked-chat'").run());
+  before = fs.readFileSync(sourceFile);
+  await importProjectThreads(store, scenarioRoot, directory);
+  assert.deepEqual(store.get(original.id), {...preserved,archivedAt:null},'Unarchive must restore the same entry and metadata');
+  assert.deepEqual(fs.readFileSync(sourceFile),before);
+  assert.deepEqual(fs.readFileSync(context),contextBefore,'Archive changes must not replace progress credentials');
+  assert.equal(fs.readdirSync(path.dirname(context)).length,1);
+  assert.deepEqual(nativeReadCalls,[]); assert.deepEqual(archived,[]);
 });
 
 scenario('进入验收才请求待测试；Möbius 返回状态与目标状态分别保存', async () => {

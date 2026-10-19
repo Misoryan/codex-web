@@ -15,7 +15,9 @@ export type Workflow = {
   plan: { step: string; status: string }[]; runtime: string; activeFlags?: string[]; runtimeCheckedAt?: string;
   lastMessage: string; pending: number; error: string | null;
   createdAt: string; updatedAt: string;
-  issue: { number: number; url: string } | null; project: string;
+  issue: { number: number; url: string; title?: string; status?: string; ancestors?: { number: number; title: string; url: string }[] } | null; project: string;
+  relatedIssues?: { number: number; title?: string; url: string; status?: string }[];
+  workflowSource?: "issue-fix" | "workflow";
   deliveries: Delivery[]; worktrees: Worktree[]; resources: Resource[];
   cleanup: { state: "none" | "pending" | "blocked" | "released"; reason: string; checkedAt?: string; releasedAt?: string };
   archivedAt: string | null; imported: boolean;

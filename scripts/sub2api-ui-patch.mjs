@@ -3,8 +3,6 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
 
-const profile = {displayName: 'Codex', isProfileAvailable: false, profileImageUrl: null};
-
 export async function patchSub2ApiTrigger(source) {
   if (source.includes('CODEX_SUB2API_TRIGGER')) return source;
   const ast = ts.createSourceFile('initial.js', source, 99, true, ts.ScriptKind.JS);
@@ -13,19 +11,20 @@ export async function patchSub2ApiTrigger(source) {
   let body = fn.getText(ast);
   for (const [from,to] of [
     ['let De = Ee,','let De = codexWebSavedProfile,'],
-    ['let ke = Oe,','let ke = codexWebSavedProfile,'],
+    ['let ke = Oe,','let ke = De,'],
     ['ke == null || j','ke == null'],
-    ['src: ce ? null : me,','src: codexWebSavedProfile.profileImageUrl,'],
-    ['ce = !1;','ce = !1;'],
+    ['src: ce ? null : me,','src: ke?.profileImageUrl,'],
   ]) {
     if (body.split(from).length !== 2) throw Error('Profile trigger anchor changed: '+from);
     body=body.replace(from,to);
   }
-  return source.slice(0,fn.getStart(ast))+body+source.slice(fn.end)+`\n/* CODEX_SUB2API_TRIGGER */\nvar codexWebSavedProfile=${JSON.stringify(profile)};\n`;
+  body = body.replace('function iPo(e) {', 'function iPo(e) {\n  let codexWebSavedProfile = codexWebUsePlatformProfile();');
+  const hook = (await fs.readFile(new URL('../src/browser/profile-identity.js',import.meta.url),'utf8')).replace('export function createPlatformProfileHook','function createPlatformProfileHook');
+  return source.slice(0,fn.getStart(ast))+body+source.slice(fn.end)+`\n/* CODEX_SUB2API_TRIGGER */\n${hook}\nvar codexWebUsePlatformProfile = createPlatformProfileHook(cPo);\n`;
 }
 
 export async function patchSub2ApiUsage(source) {
-  if (source.includes('CODEX_SUB2API_USAGE_START')) return source.replace('personalPlanLabel: n.modelProviderName,', 'personalPlanLabel: null,');
+  if (source.includes('CODEX_SUB2API_USAGE_START')) return source;
   const ast = ts.createSourceFile('profile.js', source, 99, true, ts.ScriptKind.JS);
   const fn = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'Yi');
   if (!fn) throw Error('Desktop profile menu changed');
@@ -34,11 +33,8 @@ export async function patchSub2ApiUsage(source) {
     if (body.split(from).length !== 2) throw Error('Desktop profile anchor changed: ' + from);
     body = body.replace(from, to);
   };
-  once('let e = n.profileIdentity,', 'let e = codexSub2ApiProfile,');
   once('e == null || R', 'e == null');
-  once('src: Kt,', 'src: codexSub2ApiProfile.profileImageUrl,');
-  once('accountIcon: o,', 'accountIcon: (0,$.jsx)(En,{alt:``,name:codexSub2ApiProfile.displayName,size:`xs`,src:codexSub2ApiProfile.profileImageUrl}),');
-  once('displayName: v,', 'displayName: codexSub2ApiProfile.displayName,');
+  once('src: Kt,', 'src: e.profileImageUrl,');
   once('identityItems: y,', 'identityItems: null,');
   once('personalPlanLabel: d,', 'personalPlanLabel: null,');
   once('usageItems: k,', 'usageItems: (0,$.jsx)(CodexSub2ApiUsage,{active:a}),');
@@ -47,7 +43,6 @@ export async function patchSub2ApiUsage(source) {
   const component = (await fs.readFile(new URL('../src/browser/sub2api-usage.js',import.meta.url),'utf8')).replace('export function createSub2ApiUsage','function createSub2ApiUsage');
   return `import CodexUsageIcon from './gauge-BbF64vwF-3da22a60689a.js';\nimport {KT as CodexDisclosure} from './app-shared-8bd9d0399038.js';\n` + source + `
 /* CODEX_SUB2API_USAGE_START */
-var codexSub2ApiProfile=${JSON.stringify(profile)};
 ${component}
 var codexSub2ApiComponent;
 function CodexSub2ApiUsage(props) {

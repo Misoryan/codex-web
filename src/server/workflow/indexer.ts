@@ -21,11 +21,22 @@ export function issueFrom(text: string) {
 export async function importProjectThreads(store: WorkflowStore, cwd: string, directory: string) {
   const file = path.join(process.env.CODEX_HOME!, "state_5.sqlite");
   try { await fs.access(file); } catch { return; }
+  const existing = new Map(store.list().filter(task => task.threadId).map(task => [task.threadId!, task]));
   const db = new Database(file, { readonly: true, fileMustExist: true });
-  let rows: any[];
-  try { rows = db.prepare("SELECT id,name,title,preview,first_user_message,cwd,source,updated_at,project_id FROM threads WHERE archived=0 AND first_user_message<>'' ORDER BY updated_at DESC LIMIT 1000").all(); }
+  let rows: any[], trackedRows: any[];
+  try {
+    rows = db.prepare("SELECT id,name,title,preview,first_user_message,cwd,source,updated_at,project_id FROM threads WHERE archived=0 AND first_user_message<>'' ORDER BY updated_at DESC LIMIT 1000").all();
+    const tracked = db.prepare("SELECT id,cwd,source,archived,archived_at,updated_at FROM threads WHERE id=?");
+    trackedRows = [...existing.keys()].map(id => tracked.get(id)).filter(Boolean);
+  }
   finally { db.close(); }
-  const existing = new Set(store.list().map(task => task.threadId));
+  for (const row of trackedRows) {
+    if (!within(cwd, row.cwd) || row.source.includes("subagent")) continue;
+    const task = existing.get(row.id)!;
+    const archivedAt = row.archived ? new Date((row.archived_at ?? row.updated_at) * 1000).toISOString() : null;
+    if (task.archivedAt !== archivedAt) store.update(task.id, { archivedAt, updatedAt: task.updatedAt },
+      archivedAt ? "conversation.archived" : "conversation.unarchived");
+  }
   for (const row of rows) {
     if (!within(cwd, row.cwd) || row.source.includes("subagent") || existing.has(row.id)) continue;
     const title = (row.name || row.title || "EaseCation 工作").slice(0, 200);

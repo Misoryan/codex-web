@@ -6,11 +6,14 @@ import { WorkflowStore } from "./store";
 import { closeRuntimeObservers, createWorkflowThread, workflowHost, workflowManager, workflowSnapshots } from "./host";
 import { within, importProjectThreads } from "./indexer";
 import { WorkflowLifecycle } from "./lifecycle";
+import { WorkflowInbox } from "./inbox";
+import { workflowIssueTitle } from "./title";
 
 const prefix = "/__backend/workflow";
 const stages = ["intake", "research", "implementation", "verification", "delivery", "done"];
 const kinds = ["feature", "fix", "improvement", "research"];
 const reportProperties = {
+  title: { type: "string", minLength: 1, maxLength: 200 },
   stage: { type: "string", enum: stages },
   status: { type: "string", enum: ["running", "waiting", "blocked", "completed"] },
   summary: { type: "string", maxLength: 8000 },
@@ -47,6 +50,7 @@ export async function registerWorkflow(app: FastifyInstance) {
   const directory = path.resolve(process.env.CODEX_WORKFLOW_DATA ?? path.join(process.env.CODEX_HOME!, "workflow"));
   const store = new WorkflowStore(directory);
   const lifecycle = new WorkflowLifecycle(store, cwd);
+  const inbox = new WorkflowInbox(store);
   const agentToken = randomBytes(32).toString("hex");
   const endpoint = process.env.CODEX_WORKFLOW_LOCAL_URL + prefix;
   await fs.writeFile(path.join(directory, "service.json"), JSON.stringify({ endpoint, agentToken }), { mode: 0o600 });
@@ -54,10 +58,15 @@ export async function registerWorkflow(app: FastifyInstance) {
   let polling = false;
   let notificationConnection: any, unsubscribe: (() => void) | undefined;
   let refreshing: Promise<void> | undefined;
+  let indexing: Promise<void> | undefined;
+  function syncThreads() {
+    return indexing ??= importProjectThreads(store, cwd, directory).finally(() => { indexing = undefined; });
+  }
   function refreshAll(includeImported = false) {
     if (refreshing) return;
     refreshing = (async () => {
-      await importProjectThreads(store, cwd, directory);
+      await syncThreads();
+      await inbox.refresh(includeImported);
       const tasks = store.list().filter(task => !task.archivedAt && (task.managed || includeImported && task.issue));
       let index = 0;
       await Promise.all(Array.from({ length: 3 }, async () => {
@@ -77,7 +86,8 @@ export async function registerWorkflow(app: FastifyInstance) {
     try { workflowManager(); return { ready: true, cwd }; }
     catch (error) { return { ready: false, cwd, error: (error as Error).message }; }
   });
-  app.get(prefix, async () => store.list());
+  app.get(prefix, async () => { await syncThreads(); return store.list(); });
+  app.get(prefix + "/inbox", async () => inbox.snapshot());
   app.post(prefix + "/attach", { schema: { body: { type: "object", additionalProperties: false,
     required: ["threadId"], properties: { threadId: { type: "string", format: "uuid" } },
   } } }, async (request, reply) => {
@@ -103,13 +113,34 @@ export async function registerWorkflow(app: FastifyInstance) {
     required: ["requestKey", "title", "kind", "prompt"], properties: {
       requestKey: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 200 },
       kind: { type: "string", enum: kinds }, prompt: { type: "string", minLength: 1, maxLength: 32000 },
+      issueNumber: { type: "integer", minimum: 1, maximum: 100000000 },
     } } } }, async (request, reply) => {
     const input = request.body as any;
-    const existing = store.byKey(input.requestKey);
+    const existing = store.byKey(input.requestKey) ?? (input.issueNumber ? inbox.associated(input.issueNumber) : undefined);
     if (existing) return existing;
     try { workflowManager(); } catch (error) { return reply.code(503).send({ error: (error as Error).message }); }
     if (!input.title.trim() || !input.prompt.trim()) return reply.code(400).send({ error: "请填写标题和工作内容" });
-    const { task, token } = store.create(input.requestKey, { title: input.title.trim(), kind: input.kind, prompt: input.prompt.trim(), cwd });
+    let issue;
+    if (input.issueNumber) {
+      try { issue = await inbox.findAssigned(input.issueNumber); }
+      catch (error) { return reply.code(503).send({ error: (error as Error).message }); }
+      if (!issue) return reply.code(409).send({ error: "该事项已完成或已不由你负责，请重新同步" });
+      const associated = inbox.associated(issue.number);
+      if (associated) return associated;
+    }
+    const key = issue ? "issue:" + issue.number : input.requestKey;
+    const duplicate = store.byKey(key);
+    if (duplicate) return duplicate;
+    let title = input.title.trim();
+    if (issue) {
+      try { title = workflowIssueTitle(issue.number, title); }
+      catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
+    }
+    const created = store.create(key, { title, kind: input.kind,
+      prompt: issue ? `${input.prompt.trim()}\n\n对应 Möbius 事项：${issue.url}（#${issue.number}）。读取原事项需求并复用该事项，先核对已有工作与交付。` : input.prompt.trim(), cwd });
+    const token = created.token;
+    const task = issue ? store.update(created.task.id, { issue, project: issue.project ?? "", workflowSource: "workflow",
+      mobius: { status: issue.status, desired: null, checkedAt: new Date().toISOString(), error: null } }, "issue.linked") : created.task;
     void (async () => {
       const contextFile = path.join(directory, "contexts", task.id + ".json");
       await fs.mkdir(path.dirname(contextFile), { recursive: true });
@@ -136,10 +167,25 @@ export async function registerWorkflow(app: FastifyInstance) {
     if (previous.archivedAt || previous.cleanup.state === "released" && (report.worktrees || report.resources || report.deliveries)) return reply.code(409).send({ error: "资源已收尾，请在新事项中登记后续工作" });
     if (report.worktrees?.some((worktree: any) => !within(cwd, worktree.path) || !within(cwd, worktree.repo))) return reply.code(400).send({ error: "工作区须位于工作流项目目录内" });
     if (report.issue) {
+      if (previous.issue?.number === report.issue.number) report.issue = { ...previous.issue, ...report.issue };
       const base = process.env.CODEX_WORKFLOW_ISSUE_URL;
       if (!base) return reply.code(503).send({ error: "事项入口尚未配置" });
       const url = new URL(base); url.searchParams.set("issue", String(report.issue.number));
       report.issue.url = url.href;
+    }
+    if (report.title) {
+      const number = report.issue?.number ?? previous.issue?.number;
+      try { report.title = number ? workflowIssueTitle(number, report.title) : report.title.trim(); }
+      catch (error) { return reply.code(400).send({ error: (error as Error).message }); }
+      if (!report.title) return reply.code(400).send({ error: "请填写事项总结作为标题" });
+      if (previous.threadId) {
+        try {
+          const client = workflowHost().getLocalAppServerClient();
+          await client.sendAppServerRequest("thread/name/set", { threadId: previous.threadId, name: report.title });
+          const observed = await client.readThread(previous.threadId, { includeTurns: false });
+          if (observed.name !== report.title) throw Error("会话标题未确认");
+        } catch { return reply.code(503).send({ error: "会话标题更新未确认，请稍后重试" }); }
+      }
     }
     if (report.deliveries) report.deliveries = report.deliveries.map((d: any) => ({ ...d, url: `https://github.com/${d.repo}/pull/${d.pr}` }));
     if (report.resources) report.resources = report.resources.map((resource: any) => ({ ...resource, released: false }));
@@ -182,8 +228,8 @@ export async function registerWorkflow(app: FastifyInstance) {
       }
     } finally { polling = false; }
   }, 10000);
-  await importProjectThreads(store, cwd, directory);
+  await syncThreads();
   timer.unref();
   refreshAll(true);
-  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await lifecycle.drain(); closeRuntimeObservers(); store.close(); });
+  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await indexing; await lifecycle.drain(); closeRuntimeObservers(); store.close(); });
 }
