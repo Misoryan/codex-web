@@ -44,6 +44,14 @@ function load(name) {
 }
 const {WorkflowStore} = load('store');
 const {WorkflowLifecycle} = load('lifecycle');
+// Observe completion without replacing lifecycle decisions or subprocess execution.
+const reconciliations = [];
+const originalReconcile = WorkflowLifecycle.prototype.reconcile;
+WorkflowLifecycle.prototype.reconcile = function(id, archive) {
+  const operation = originalReconcile.call(this, id, archive);
+  reconciliations.push({id, operation, startedAt: Date.now()});
+  return operation;
+};
 const {removeWorktree} = load('git');
 const {registerWorkflow} = load('routes');
 const {importProjectThreads} = load('indexer');
@@ -108,6 +116,7 @@ function helperCalls() {
   return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
 }
 function resetScenario() {
+  reconciliations.length = 0;
   scenarioRoot = path.join(root, 'case-' + ++serial);
   fs.mkdirSync(scenarioRoot);
   github = new Map(); githubCalls = [];
@@ -495,11 +504,13 @@ for (const isDraft of [false,true]) scenario(`HTTP 登记${isDraft?'草稿':'普
     const attached=await app.inject({method:'POST',url:prefix+'/attach',headers:{authorization:'Bearer '+service.agentToken},payload:{threadId:id}});
     assert.equal(attached.statusCode,200,attached.body);
     const context=attached.json();
+    const beforeReport=reconciliations.length;
     const response=await app.inject({method:'POST',url:prefix+'/'+context.workflowId+'/report',headers:{authorization:'Bearer '+context.token},
       payload:{stage:'implementation',issue:{number:110},deliveries:[delivery],summary:'Development PR created'}});
     assert.equal(response.statusCode,200,response.body);
-    await waitFor(async ()=>(await app.inject(prefix+'/'+context.workflowId)).json().mobius.status==='READY_FOR_TEST');
+    await waitForReconciliation(context.workflowId,beforeReport);
     const result=(await app.inject(prefix+'/'+context.workflowId)).json();
+    assert.equal(result.mobius.status,'READY_FOR_TEST');
     assert.equal(result.stage,'implementation');assert.equal(result.deliveries[0].state,'OPEN');assert.equal(result.deliveries[0].isDraft,isDraft);
     assert(Number.isFinite(Date.parse(result.deliveries[0].checkedAt)));
     assert.equal(result.deliveries[0].devMergedAt,undefined);assert.equal(result.deliveries[0].masterMergedAt,undefined);
@@ -542,19 +553,23 @@ scenario('HTTP 上报凭据、范围和元数据登记边界；刷新实际执�
     const headers = {authorization: 'Bearer ' + context.token};
     const outside = await app.inject({method: 'POST', url: reportUrl, headers, payload: {worktrees: [{repo: path.dirname(root), path: path.join(path.dirname(root), 'outside'), branch: 'feature-fixture', head: 'a'.repeat(40)}]}});
     assert.equal(outside.statusCode, 400); assert.match(outside.json().error, /项目目录内/);
+    const beforeReport=reconciliations.length;
     const report = await app.inject({method: 'POST', url: reportUrl, headers, payload: {stage: 'verification', issue: {number: 105}, summary: 'Ready for acceptance'}});
     assert.equal(report.statusCode, 200, report.body); assert.equal(report.json().managed, true);
     assert.equal(report.json().issue.url, 'https://issues.example.invalid/my-tasks?issue=105');
-    await waitFor(async () => (await app.inject(prefix + '/' + context.workflowId)).json().mobius.status === 'READY_FOR_TEST');
+    await waitForReconciliation(context.workflowId,beforeReport);
+    assert.equal((await app.inject(prefix+'/'+context.workflowId)).json().mobius.status,'READY_FOR_TEST');
     for (const action of ['refresh', context.workflowId + '/release', context.workflowId + '/archive']) {
       const denied = await app.inject({method: 'POST', url: prefix + '/' + action, headers: {origin: 'https://attacker.invalid'}});
       assert.equal(denied.statusCode, 403);
     }
     const callsBeforeRefresh = helperCalls().length;
+    const beforeRefresh=reconciliations.length;
     const valid = await app.inject({method: 'POST', url: prefix + '/refresh', headers: {authorization: 'Bearer ' + service.agentToken}});
     assert.equal(valid.statusCode, 202); assert.equal(valid.json().syncing, true);
-    await waitFor(async () => helperCalls().length > callsBeforeRefresh &&
-      (await app.inject(prefix + '/' + context.workflowId)).json().mobius.status === 'READY_FOR_TEST');
+    await waitForReconciliation(context.workflowId,beforeRefresh);
+    assert(helperCalls().length>callsBeforeRefresh);
+    assert.equal((await app.inject(prefix+'/'+context.workflowId)).json().mobius.status,'READY_FOR_TEST');
   } finally { await app.close(); }
 });
 
@@ -570,6 +585,7 @@ scenario('HTTP caller 伪造 dev/master 合入时间不能把未合 PR 同步为
       headers: {authorization: 'Bearer ' + service.agentToken}, payload: {threadId: id}});
     assert.equal(attached.statusCode, 200, attached.body);
     const context = attached.json();
+    const beforeReport=reconciliations.length;
     const report = await app.inject({method: 'POST', url: prefix + '/' + context.workflowId + '/report',
       headers: {authorization: 'Bearer ' + context.token}, payload: {stage: 'done', status: 'completed',
         summary: 'Caller claims completion', issue: {number: 107}, deliveries: [delivery], worktrees: [fixture.worktree]}});
@@ -577,7 +593,8 @@ scenario('HTTP caller 伪造 dev/master 合入时间不能把未合 PR 同步为
       assert.match(report.body, /additional|properties|合入|字段/i, 'A strict schema may reject caller-supplied server facts');
     } else {
       assert.equal(report.statusCode, 200, report.body);
-      await waitFor(async () => (await app.inject(prefix + '/' + context.workflowId)).json().mobius.status === 'READY_FOR_TEST');
+      await waitForReconciliation(context.workflowId,beforeReport);
+      assert.equal((await app.inject(prefix+'/'+context.workflowId)).json().mobius.status,'READY_FOR_TEST');
     }
     const result = (await app.inject(prefix + '/' + context.workflowId)).json();
     assert.notEqual(result.mobius.status, 'DONE'); assert.equal(result.archivedAt, null);
@@ -601,23 +618,35 @@ scenario('HTTP 核对 GitHub 期间拒绝并发覆盖登记，完成核对后保
     assert.equal(attached.statusCode, 200, attached.body);
     const context = attached.json(), headers = {authorization: 'Bearer ' + context.token};
     const url = prefix + '/' + context.workflowId + '/report';
+    const beforeReport=reconciliations.length;
     const first = await app.inject({method: 'POST', url, headers,
       payload: {stage: 'verification', issue: {number: 109}, deliveries: [{repo: delivery.repo, pr: delivery.pr, base: 'dev', release: 'master'}]}});
     assert.equal(first.statusCode, 200, first.body);
     const concurrent = await app.inject({method: 'POST', url, headers, payload: {deliveries: [], summary: 'Concurrent replacement'}});
     assert.equal(concurrent.statusCode, 409); assert.match(concurrent.json().error, /正在核对/);
     finishGithub();
-    await waitFor(async () => (await app.inject(prefix + '/' + context.workflowId)).json().mobius.status === 'READY_FOR_TEST');
+    await waitForReconciliation(context.workflowId,beforeReport);
     const observed = (await app.inject(prefix + '/' + context.workflowId)).json();
+    assert.equal(observed.mobius.status,'READY_FOR_TEST');
     assert.equal(observed.deliveries.length, 1); assert.equal(observed.deliveries[0].pr, 1);
     assert.notEqual(observed.summary, 'Concurrent replacement');
   } finally { finishGithub?.(); await app.close(); }
 });
 
-async function waitFor(predicate) {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 20)); }
-  throw Error('Timed out waiting for the real asynchronous report reconciliation');
+async function waitForReconciliation(id, after) {
+  const deadline=Date.now()+45000;
+  let observed;
+  while (!(observed=reconciliations.slice(after).find(item=>item.id===id))) {
+    if(Date.now()>=deadline) throw Error('Lifecycle reconciliation did not start within 45000ms');
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  let timeout;
+  try {
+    await Promise.race([observed.operation,new Promise((_,reject)=>{
+      timeout=setTimeout(()=>reject(Error('Lifecycle reconciliation did not finish within 45000ms')),Math.max(1,deadline-Date.now()));
+    })]);
+  } finally {clearTimeout(timeout);}
+  console.log('Lifecycle completion observed:',Date.now()-observed.startedAt,'ms');
 }
 
 function cleanupFixture(directory) {
@@ -638,11 +667,16 @@ function cleanupFixture(directory) {
 }
 
 (async () => {
+  const args=process.argv.slice(2);
+  assert(args.length===0||args.length===2&&args[0]==='--match','Usage: node scripts/test-workflow-lifecycle.cjs [--match regex]');
+  const pattern=args.length?new RegExp(args[1]):null;
+  const selected=pattern?scenarios.filter(item=>pattern.test(item.name)):scenarios;
+  assert(selected.length,'No workflow lifecycle scenarios matched');
   const temporaryParent = path.resolve('runtime/tmp');
   fs.mkdirSync(temporaryParent, {recursive: true});
   root = fs.mkdtempSync(path.join(temporaryParent, 'workflow-lifecycle-'));
   const helper = path.join(root, 'external-helper.py');
-  fs.writeFileSync(helper, `import argparse,json,os,sys\np=argparse.ArgumentParser()\nfor key in ['number','desired','kind','task','lease','slot']: p.add_argument('--'+key)\na=vars(p.parse_args())\nwith open(os.environ['WORKFLOW_FIXTURE_CALLS'],'a',encoding='utf8') as f: f.write(json.dumps(a)+'\\n')\nif a['number']:\n if os.environ.get('WORKFLOW_FIXTURE_MOBIUS_FAIL'): sys.exit('Fixture Mobius unavailable')\n print(json.dumps({'status':a['desired'] or os.environ['WORKFLOW_FIXTURE_MOBIUS_STATUS']}))\nelse: print(json.dumps({'released':os.environ['WORKFLOW_FIXTURE_RESOURCE_RELEASED']=='true','error':'Fixture lease still active'}))\n`);
+  fs.writeFileSync(helper, `import argparse,json,os,sys,time\np=argparse.ArgumentParser()\nfor key in ['number','desired','kind','task','lease','slot']: p.add_argument('--'+key)\na=vars(p.parse_args())\nwith open(os.environ['WORKFLOW_FIXTURE_CALLS'],'a',encoding='utf8') as f: f.write(json.dumps(a)+'\\n')\nif a['number']:\n time.sleep(float(os.environ.get('WORKFLOW_FIXTURE_MOBIUS_DELAY_MS','0'))/1000)\n if os.environ.get('WORKFLOW_FIXTURE_MOBIUS_FAIL'): sys.exit('Fixture Mobius unavailable')\n print(json.dumps({'status':a['desired'] or os.environ['WORKFLOW_FIXTURE_MOBIUS_STATUS']}))\nelse: print(json.dumps({'released':os.environ['WORKFLOW_FIXTURE_RESOURCE_RELEASED']=='true','error':'Fixture lease still active'}))\n`);
   process.env.CODEX_WORKFLOW_MOBIUS_HELPER = helper;
   process.env.CODEX_WORKFLOW_RESOURCE_HELPER = helper;
   const remoteHelper=path.join(root,'remote-helper.py');
@@ -651,7 +685,7 @@ function cleanupFixture(directory) {
   process.env.CODEX_WORKFLOW_PYTHON = process.env.CODEX_WORKFLOW_TEST_PYTHON || 'python';
   let failures = 0;
   try {
-    for (const item of scenarios) {
+    for (const item of selected) {
       resetScenario();
       try { await item.run(); console.log('PASS:', item.name); }
       catch (error) { failures++; console.error('FAIL:', item.name); console.error(error); }
@@ -664,5 +698,5 @@ function cleanupFixture(directory) {
     cleanupFixture(root);
   }
   assert.equal(failures, 0, `${failures} workflow lifecycle scenarios failed`);
-  console.log(`PASS: ${scenarios.length} workflow lifecycle and HTTP business boundary scenarios`);
+  console.log(`PASS: ${selected.length} workflow lifecycle and HTTP business boundary scenarios`);
 })().catch(error => { console.error(error); process.exitCode = 1; });
