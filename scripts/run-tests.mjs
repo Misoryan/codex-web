@@ -8,7 +8,7 @@ const tests = process.argv.includes('--desktop') ? [
 ] : [
   'test-statsig-cache.cjs', 'test-resumable-sessions.cjs', 'test-sub2api-capacity.cjs',
   'test-usage-cost-api.cjs', 'test-electron-logging.cjs', 'test-public-connection.cjs',
-  'test-browser-guest.cjs', 'test-monitoring.cjs', 'test-workflow-runtime.cjs', 'test-workflow-lifecycle.cjs',
+  'test-browser-guest.cjs', 'test-monitoring.cjs', 'test-workflow-runtime.cjs', 'test-workflow-lifecycle.cjs', 'test-workflow-activity.cjs',
   'test-mcp-app-sandbox.cjs', 'test-profile-identity.cjs', 'test-workflow-inbox.cjs',
 ];
 for (const test of tests) {

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID, randomBytes, createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 const Database = require("better-sqlite3");
 export type Delivery = { repo: string; pr: number; url: string; base: string; release: string;
@@ -78,7 +79,17 @@ export class WorkflowStore {
     if (!previous) throw Error("工作流不存在");
     const next = { ...previous, ...patch };
     if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
-    next.updatedAt = patch.updatedAt ?? new Date().toISOString();
+    const inspected = event === "remote-worktrees.checked" ? ["remoteWorktrees", "remoteWorktreesSync"]
+      : event === "delivery.checked" ? ["deliveries"] : undefined;
+    if (inspected) {
+      const content = (task: Workflow) => JSON.parse(JSON.stringify(
+        Object.fromEntries(inspected.map(key => [key, task[key as keyof Workflow]])),
+        (key, value) => key === "checkedAt" ? undefined : value));
+      if (isDeepStrictEqual(content(previous), content(next))) {
+        event = undefined;
+      } else event = event!.replace(/\.checked$/, ".updated");
+    }
+    next.updatedAt = patch.updatedAt ?? (inspected && !event ? previous.updatedAt : new Date().toISOString());
     this.db.prepare("UPDATE workflows SET data=? WHERE id=?").run(JSON.stringify(next), id);
     if (event) this.event(id, event, patch);
     return next;
@@ -88,7 +99,7 @@ export class WorkflowStore {
       .run(id, new Date().toISOString(), kind, JSON.stringify(data));
   }
   events(id: string) {
-    return this.db.prepare("SELECT seq,time,kind,data FROM events WHERE workflow_id=? ORDER BY seq DESC LIMIT 100")
+    return this.db.prepare("SELECT seq,time,kind,data FROM events WHERE workflow_id=? AND kind NOT IN ('remote-worktrees.checked','delivery.checked') ORDER BY seq DESC LIMIT 100")
       .all(id).map((row: any) => ({ ...row, data: JSON.parse(row.data) }));
   }
   close() { this.db.close(); }
