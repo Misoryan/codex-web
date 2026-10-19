@@ -192,7 +192,8 @@ scenario('从当前 Codex SQLite 索引已有项目会话，排除空会话、�
       'The retired has_user_event flag does not identify these existing user conversations');
   } finally { source.close(); }
   const before = fs.readFileSync(sourceFile);
-  const store = storeFixture(), directory = fixtureDirectory('index-data');
+  const directory = fixtureDirectory('index-data'), store = new WorkflowStore(directory);
+  stores.add(store);
   await importProjectThreads(store, scenarioRoot, directory);
   const imported = store.list();
   assert.deepEqual(imported.map(task => task.threadId).sort(), ['nested-chat', 'root-chat']);
@@ -219,6 +220,24 @@ scenario('从当前 Codex SQLite 索引已有项目会话，排除空会话、�
   assert.deepEqual(fs.readFileSync(sourceFile), before, 'Import must leave the source database unchanged');
   assert.deepEqual(nativeReadCalls, []);
   assert.deepEqual(archived, []);
+  process.env.CODEX_WORKFLOW_DATA=directory;
+  const app=require('fastify')();
+  try {
+    await registerWorkflow(app);
+    for(const [name,title,expected] of [['Renamed native task','Stale generated title','Renamed native task'],['','Updated generated title','Updated generated title']]) {
+      const native=new Database(sourceFile);
+      try {native.prepare("UPDATE threads SET name=?,title=?,updated_at=1700000300 WHERE id='root-chat'").run(name,title);}
+      finally {native.close();}
+      const nativeBefore=fs.readFileSync(sourceFile);
+      const response=await app.inject(prefix);
+      assert.equal(response.statusCode,200,response.body);
+      assert.deepEqual(response.json().find(task=>task.id===rootTask.id),{...rootTask,title:expected},
+        'HTTP list must follow the native name or generated title without changing workflow progress or metadata');
+      assert.deepEqual(fs.readFileSync(sourceFile),nativeBefore,'Title observation must not write native SQLite');
+    }
+    assert.equal(store.list().length,2);
+    for(const [file,text] of contexts) assert.equal(fs.readFileSync(file,'utf8'),text);
+  } finally {await app.close();}
 });
 
 scenario('既有事项跟随原生 SQLite 归档与取消归档，保留关联和资源且不导入历史归档', async () => {
@@ -257,7 +276,7 @@ scenario('既有事项跟随原生 SQLite 归档与取消归档，保留关联�
   });
   let before = fs.readFileSync(sourceFile);
   await importProjectThreads(store, scenarioRoot, directory);
-  assert.deepEqual(store.get(original.id), {...preserved,archivedAt:'2023-11-14T22:15:00.000Z'},
+  assert.deepEqual(store.get(original.id), {...preserved,title:'Renamed elsewhere',archivedAt:'2023-11-14T22:15:00.000Z'},
     'Native archive must hide the existing entry without losing business metadata, resources or progress time');
   assert.equal(store.list().length,1,'Historical archived and outside conversations must not be imported');
   assert.deepEqual(fs.readFileSync(sourceFile),before,'Archive observation must not write the native database');
@@ -265,10 +284,10 @@ scenario('既有事项跟随原生 SQLite 归档与取消归档，保留关联�
   await importProjectThreads(store, scenarioRoot, directory);
   assert.deepEqual(store.get(original.id),archivedTask);
   assert.equal(store.db.prepare('SELECT count(*) AS count FROM events').get().count,eventCount,'Repeated archive observation must be idempotent');
-  sourceWrite(db => db.prepare("UPDATE threads SET archived=0,archived_at=NULL,updated_at=1700000300 WHERE id='tracked-chat'").run());
+  sourceWrite(db => db.prepare("UPDATE threads SET archived=0,archived_at=NULL,updated_at=1700000300,name='',title='Updated native title' WHERE id='tracked-chat'").run());
   before = fs.readFileSync(sourceFile);
   await importProjectThreads(store, scenarioRoot, directory);
-  assert.deepEqual(store.get(original.id), {...preserved,archivedAt:null},'Unarchive must restore the same entry and metadata');
+  assert.deepEqual(store.get(original.id), {...preserved,title:'Updated native title',archivedAt:null},'Unarchive must restore the same entry and metadata while following the native title');
   assert.deepEqual(fs.readFileSync(sourceFile),before);
   assert.deepEqual(fs.readFileSync(context),contextBefore,'Archive changes must not replace progress credentials');
   assert.equal(fs.readdirSync(path.dirname(context)).length,1);
