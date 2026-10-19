@@ -8,6 +8,8 @@ export type Delivery = { repo: string; pr: number; url: string; base: string; re
 export type Worktree = { repo: string; path: string; branch: string; head: string;
   removalStartedAt?: string; removedAt?: string; releasedAt?: string };
 export type Resource = { kind: "bbdev-lease" | "bedrock-client"; task: string; lease: string; slot?: number; released: boolean };
+export type RemoteWorktree = { host: "bbdev"; task: string; path: string; branch: string; head: string;
+  cleanup: { state: string; reason: string; checkedAt: string | null } };
 export type Workflow = {
   id: string; title: string; kind: string; prompt: string; cwd: string;
   threadId: string | null; stage: string; status: string; summary: string;
@@ -19,6 +21,7 @@ export type Workflow = {
   relatedIssues?: { number: number; title?: string; url: string; status?: string }[];
   workflowSource?: "issue-fix" | "workflow";
   deliveries: Delivery[]; worktrees: Worktree[]; resources: Resource[];
+  remoteWorktrees?: RemoteWorktree[]; remoteWorktreesSync?: { checkedAt: string; error: string | null };
   cleanup: { state: "none" | "pending" | "blocked" | "released"; reason: string; checkedAt?: string; releasedAt?: string };
   archivedAt: string | null; imported: boolean;
   managed: boolean; projectsRemoved: string[];

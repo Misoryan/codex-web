@@ -41,6 +41,17 @@ function worktreeEntries(raw:string){
  }
  return entries;
 }
+export async function inspectRegisteredWorktree(worktree:Worktree,workspace:string):Promise<Worktree>{
+ const target=path.resolve(worktree.path),repo=path.resolve(worktree.repo);
+ if(!within(workspace,target)||!within(workspace,repo)||target.toLowerCase()===repo.toLowerCase())throw Error("路径不是项目内的独立任务 worktree");
+ if((await fs.realpath(target)).toLowerCase()!==target.toLowerCase()||(await fs.realpath(repo)).toLowerCase()!==repo.toLowerCase())throw Error("工作区不能通过符号链接登记");
+ const entries=worktreeEntries(await git(repo,"worktree","list","--porcelain","-z"));
+ const entry=entries.find(value=>path.resolve(value.path).toLowerCase()===target.toLowerCase());
+ if(!entry||entry===entries[0]||path.resolve(entries[0].path).toLowerCase()!==repo.toLowerCase())throw Error("任务 worktree 未登记或主工作区不符");
+ const root=await git(target,"rev-parse","--show-toplevel");
+ if(path.resolve(root).toLowerCase()!==target.toLowerCase()||!entry.branch?.startsWith("refs/heads/"))throw Error("任务 worktree 根目录或分支不符");
+ return {...worktree,repo,path:target,head:entry.head,branch:entry.branch.slice(11)};
+}
 export async function verifyWorktree(worktree:Worktree,workspace:string,deliveries:Delivery[]){
  const target=path.resolve(worktree.path),repo=path.resolve(worktree.repo);
  if(!within(workspace,target)||!within(workspace,repo)||target.toLowerCase()===path.resolve(workspace).toLowerCase()||target.toLowerCase()===repo.toLowerCase())throw Error("路径不是项目内的独立任务 worktree");

@@ -3,6 +3,7 @@ import { command, inspectDelivery, removeWorktree } from "./git";
 import { within } from "./indexer";
 import { workflowHost, workflowManager, workflowSnapshot } from "./host";
 import type { Workflow, WorkflowStore } from "./store";
+import { refreshRemoteWorktrees } from "./remote-worktrees";
 
 export function desiredIssueStatus(task: Workflow) {
   if (task.deliveries.some(delivery => delivery.error)) return null;
@@ -106,6 +107,11 @@ export class WorkflowLifecycle {
         if (projects.getLocalProjects()[project.id]) throw Error("临时项目入口仍存在");
         this.store.update(task.id, { projectsRemoved: [...this.store.get(task.id)!.projectsRemoved, project.id] });
       }
+      const current = this.store.get(task.id)!;
+      if (current.remoteWorktreesSync?.error || current.remoteWorktrees?.some(worktree => worktree.cleanup.state !== "cleaned")) {
+        this.store.update(task.id, { cleanup: { state: "pending", reason: current.remoteWorktreesSync?.error ?? "远端工作区等待 bbdev 回收确认", checkedAt: new Date().toISOString() } });
+        return;
+      }
       this.store.update(task.id, { cleanup: { state: "released", reason: "", releasedAt: new Date().toISOString() } }, "resources.released");
     } catch (error) {
       this.store.update(task.id, { cleanup: { state: "blocked", reason: (error as Error).message, checkedAt: new Date().toISOString() } }, "cleanup.blocked");
@@ -124,6 +130,8 @@ export class WorkflowLifecycle {
     try {
       let task = this.store.get(id)!;
       if (!task || task.archivedAt) return task;
+      await refreshRemoteWorktrees(this.store, id);
+      task = this.store.get(id)!;
       const deliveries = [];
       for (const delivery of task.deliveries) {
         try { deliveries.push(await inspectDelivery(delivery)); }
@@ -137,6 +145,7 @@ export class WorkflowLifecycle {
       const done = task.deliveries.length ? task.deliveries.every(d => d.masterMergedAt) : task.kind === "research" && task.stage === "done" && task.status === "completed";
       if (done && task.managed) task = this.store.update(id, { stage: "done", status: "completed" });
       if (archive && done && task.managed && (!task.issue || task.mobius.status === "DONE") &&
+          !task.remoteWorktreesSync?.error && (!task.remoteWorktrees?.length || task.remoteWorktrees.every(worktree => worktree.cleanup.state === "cleaned")) &&
           (!task.worktrees.length && !task.resources.length || task.cleanup.state === "released") && task.threadId) {
         try {
           await this.assertIdle(task);

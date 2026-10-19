@@ -11,8 +11,18 @@ const ts = require('typescript');
 const sourceRoot = path.resolve('src/server/workflow');
 const modules = new Map();
 const externalExecFile = (...args) => childProcess.execFile(...args);
-externalExecFile[promisify.custom] = async (executable, args) => {
+externalExecFile[promisify.custom] = async (executable, args, options) => {
+  if (executable === 'git') return promisify(childProcess.execFile)(executable, args, options);
   assert.equal(executable, 'workflow-inbox-fixture', 'Tests must never contact production helpers');
+  if (args[2] === process.env.CODEX_WORKFLOW_REMOTE_WORKTREES_HELPER) {
+    assert.equal(args[3], '--request');
+    const request = JSON.parse(args[4]);
+    const result = JSON.parse(fs.readFileSync(process.env.WORKFLOW_REMOTE_FIXTURE_RESPONSE, 'utf8'));
+    if (result.fail) throw Error('Fixture remote unavailable');
+    if (result.delay) await new Promise(resolve => setTimeout(resolve, result.delay));
+    return {stdout: JSON.stringify(result.worktrees ? result : {worktrees: request.worktrees.map(item => ({...item,
+      branch: 'fix/fixture', head: 'a'.repeat(40), cleanup: {state: 'unregistered', reason: '', checkedAt: null}}))}), stderr: ''};
+  }
   if (args[2] === process.env.CODEX_WORKFLOW_MOBIUS_HELPER) {
     assert.deepEqual(args.slice(0, 2), ['-X', 'utf8']);
     return {stdout: JSON.stringify({status: 'IN_PROGRESS'}), stderr: ''};
@@ -41,6 +51,7 @@ function load(name) {
 }
 const {WorkflowStore} = load('store');
 const {registerWorkflow} = load('routes');
+const {refreshRemoteWorktrees} = load('remote-worktrees');
 const prefix = '/__backend/workflow';
 const environment = {...process.env}, previousHost = global.__codexWorkflowHost;
 const temporaryParent = path.resolve('runtime/tmp');
@@ -67,6 +78,9 @@ async function fixture(items, seed = () => {}) {
   const data = path.join(directory, 'data'), home = path.join(directory, 'home');
   fs.mkdirSync(home);
   const responseFile = path.join(directory, 'external-response.json');
+  const remoteFile = path.join(directory, 'remote-response.json');
+  const respondRemote = value => fs.writeFileSync(remoteFile, JSON.stringify(value));
+  respondRemote({});
   const respond = value => fs.writeFileSync(responseFile, JSON.stringify(value));
   respond({items});
   Object.assign(process.env, {
@@ -77,6 +91,7 @@ async function fixture(items, seed = () => {}) {
     CODEX_WORKFLOW_ISSUE_URL: 'https://issues.example.invalid/my-tasks',
     CODEX_WORKFLOW_PYTHON: 'workflow-inbox-fixture',
     WORKFLOW_INBOX_FIXTURE_RESPONSE: responseFile,
+    CODEX_WORKFLOW_REMOTE_WORKTREES_HELPER: path.join(root, 'remote-helper.py'), WORKFLOW_REMOTE_FIXTURE_RESPONSE: remoteFile,
   });
   const store = new WorkflowStore(data);
   seed(store, cwd);
@@ -133,7 +148,7 @@ async function fixture(items, seed = () => {}) {
   const create = (number, patch = {}) => app.inject({method: 'POST', url: prefix, headers,
     payload: {requestKey: randomUUID(), title: 'Implement assigned item', kind: 'feature',
       prompt: 'Implement the existing requirement', ...(number === undefined ? {} : {issueNumber: number}), ...patch}});
-  return {app, store, cwd, data, starts, titles, respond, create, metadata, nativeThreads, rename,
+  return {app, store, cwd, data, starts, titles, respond, respondRemote, create, metadata, nativeThreads, rename,
     async close() { await app.close(); store.close(); }};
 }
 
@@ -302,13 +317,121 @@ scenario('原生标题写入失败或回读不一致时拒绝宣称更名成功�
   }
 });
 
+scenario('本机工作区登记以 Git 为准，后续只上报摘要也刷新分支与 HEAD', async () => {
+  let created;
+  const f = await fixture([], (store, cwd) => {
+    created = store.create('local-report', {title: 'Local work', kind: 'feature', prompt: 'Requirement', cwd});
+  });
+  const repo = path.join(f.cwd, 'primary'), target = path.join(f.cwd, 'task');
+  fs.mkdirSync(repo);
+  const git = (location, ...args) => childProcess.execFileSync('git', ['-C', location, ...args], {encoding:'utf8',windowsHide:true,stdio:['ignore','pipe','pipe']}).trim();
+  git(repo, 'init', '-b', 'dev');
+  git(repo, 'config', 'user.name', 'Workflow Fixture'); git(repo, 'config', 'user.email', 'fixture@users.noreply.github.com');
+  fs.writeFileSync(path.join(repo, 'tracked.txt'), 'base'); git(repo,'add','.'); git(repo,'commit','-m','Fixture base');
+  git(repo,'worktree','add','-b','feature/task',target);
+  const report = payload => f.app.inject({method:'POST',url:prefix+'/'+created.task.id+'/report',headers:{authorization:'Bearer '+created.token},payload});
+  try {
+    let response = await report({worktrees:[{repo,path:target,branch:'invented',head:'f'.repeat(40)}]});
+    assert.equal(response.statusCode,200,response.body);
+    assert.equal(response.json().worktrees[0].head,git(target,'rev-parse','HEAD'));
+    assert.equal(response.json().worktrees[0].branch,'feature/task');
+    git(target,'switch','-c','feature/updated');
+    fs.writeFileSync(path.join(target,'tracked.txt'),'implemented'); git(target,'commit','-am','Fixture update');
+    response = await report({summary:'Implementation progressed'});
+    assert.equal(response.statusCode,200,response.body);
+    assert.equal(response.json().worktrees[0].head,git(target,'rev-parse','HEAD'));
+    assert.equal(response.json().worktrees[0].branch,'feature/updated');
+    const before=f.store.get(created.task.id).worktrees;
+    const rejected=await report({worktrees:[{repo,path:repo,branch:'dev',head:'f'.repeat(40)}]});
+    assert.equal(rejected.statusCode,409);assert.match(rejected.json().error,/本机工作区登记未确认/);
+    assert.deepEqual(f.store.get(created.task.id).worktrees,before);
+    assert.equal(f.starts.length,0);
+  } finally {await f.close();}
+});
+
+scenario('HTTP 立即登记远端工作区，分支和 HEAD 由只读工具回读，拒绝调用者伪造', async () => {
+  let created;
+  const f = await fixture([], (store, cwd) => {
+    created = store.create('remote-report', {title: 'Remote work', kind: 'fix', prompt: 'Requirement', cwd});
+  });
+  const remote = {host: 'bbdev', task: 'fixture-owned', path: '/workspace/worktrees/fixture-owned/repo'};
+  const report = payload => f.app.inject({method: 'POST', url: prefix + '/' + created.task.id + '/report',
+    headers: {authorization: 'Bearer ' + created.token}, payload});
+  try {
+    const untrusted = await report({remoteWorktrees: [{...remote, head: 'b'.repeat(40)}]});
+    assert.equal(untrusted.statusCode, 200);
+    assert.equal(untrusted.json().remoteWorktrees[0].head, 'a'.repeat(40));
+    const response = await report({remoteWorktrees: [remote], summary: 'Checkout prepared'});
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json().remoteWorktrees, [{...remote, branch: 'fix/fixture', head: 'a'.repeat(40),
+      cleanup: {state: 'unregistered', reason: '', checkedAt: null}}]);
+    assert.equal(response.json().remoteWorktreesSync.error, null);
+    assert.equal(f.store.get(created.task.id).managed, true);
+    assert.equal(f.store.get(created.task.id).worktrees.length, 0);
+    assert.equal(f.starts.length, 0);
+    f.respondRemote({fail: true});
+    const failed = await report({remoteWorktrees: [{...remote, path: remote.path + '-new'}]});
+    assert.equal(failed.statusCode, 503);
+    assert.equal(f.store.get(created.task.id).remoteWorktrees[0].path, remote.path);
+  } finally { await f.close(); }
+});
+
+scenario('远端核对未完成时 GET 列表仍立即返回已登记数据，缺失与跨任务返回不覆盖记录', async () => {
+  let created;
+  const f = await fixture([], (store, cwd) => {
+    created = store.create('remote-slow', {title: 'Remote work', kind: 'fix', prompt: 'Requirement', cwd});
+  });
+  const remote = {host: 'bbdev', task: 'fixture-owned', path: '/workspace/worktrees/fixture-owned/repo'};
+  const report = () => f.app.inject({method: 'POST', url: prefix + '/' + created.task.id + '/report',
+    headers: {authorization: 'Bearer ' + created.token}, payload: {remoteWorktrees: [remote]}});
+  try {
+    f.respondRemote({delay: 700});
+    const pending = report();
+    const result = await Promise.race([f.app.inject(prefix), new Promise((_, reject) => setTimeout(() => reject(Error('List waited for SSH')), 400))]);
+    assert.equal(result.statusCode, 200);
+    assert.equal((await pending).statusCode, 200);
+    for (const worktrees of [[], [{...remote, task: 'another-task', branch: 'fix/fixture', head: 'a'.repeat(40),
+      cleanup: {state: 'cleaned', reason: '', checkedAt: null}}]]) {
+      f.respondRemote({worktrees});
+      assert.equal((await report()).statusCode, 503);
+      assert.equal(f.store.get(created.task.id).remoteWorktrees[0].task, remote.task);
+    }
+  } finally { await f.close(); }
+});
+
+scenario('较早的远端后台核对不能覆盖同时成功的新工作区登记', async () => {
+  let created;
+  const old={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/old/repo',branch:'fix/old',head:'a'.repeat(40),cleanup:{state:'retained',reason:'',checkedAt:null}};
+  const f=await fixture([], (store,cwd)=>{
+    created=store.create('remote-race',{title:'Remote progress',kind:'feature',prompt:'Requirement',cwd});
+    store.update(created.task.id,{remoteWorktrees:[old]});
+  });
+  try {
+    f.store.update(created.task.id,{remoteWorktreesSync:undefined});
+    f.respondRemote({delay:700,worktrees:[old]});
+    const pending=refreshRemoteWorktrees(f.store,created.task.id);
+    const added={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/new/repo'};
+    f.respondRemote({});
+    const response=await f.app.inject({method:'POST',url:prefix+'/'+created.task.id+'/report',headers:{authorization:'Bearer '+created.token},
+      payload:{remoteWorktrees:[{host:old.host,task:old.task,path:old.path},added]}});
+    assert.equal(response.statusCode,200,response.body);
+    assert.equal(response.json().remoteWorktrees.length,2);
+    await pending;
+    assert.deepEqual(f.store.get(created.task.id).remoteWorktrees.map(item=>item.path),[old.path,added.path]);
+  } finally {await f.close();}
+});
+
 function cleanup() {
   assert.equal(path.dirname(root), temporaryParent);
   assert(path.basename(root).startsWith('workflow-inbox-'));
   assert.equal(fs.realpathSync(root).toLowerCase(), root.toLowerCase());
   if (process.platform === 'win32') {
-    childProcess.execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      "Remove-Item -LiteralPath '" + root.replace(/'/g, "''") + "' -Recurse -ErrorAction Stop"], {windowsHide: true, stdio: 'pipe'});
+    const script = "$taskFixture = Get-Item -LiteralPath '" + root.replace(/'/g, "''") + "'; " +
+      "$taskAttributes = [IO.FileAttributes]::ReadOnly -bor [IO.FileAttributes]::Hidden; " +
+      "Get-ChildItem -LiteralPath $taskFixture.FullName -Recurse -Force | ForEach-Object { $_.Attributes = $_.Attributes -band (-bnot $taskAttributes) }; " +
+      "$taskFixture.Attributes = $taskFixture.Attributes -band (-bnot $taskAttributes); " +
+      "Remove-Item -LiteralPath $taskFixture.FullName -Recurse -ErrorAction Stop";
+    childProcess.execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {windowsHide: true, stdio: 'pipe'});
   } else fs.rmSync(root, {recursive: true});
 }
 

@@ -8,6 +8,8 @@ import { within, importProjectThreads } from "./indexer";
 import { WorkflowLifecycle } from "./lifecycle";
 import { WorkflowInbox } from "./inbox";
 import { workflowIssueTitle } from "./title";
+import { inspectRemoteWorktrees, refreshRemoteWorktrees } from "./remote-worktrees";
+import { inspectRegisteredWorktree } from "./git";
 
 const prefix = "/__backend/workflow";
 const stages = ["intake", "research", "implementation", "verification", "delivery", "done"];
@@ -30,6 +32,11 @@ const reportProperties = {
       repo: { type: "string", minLength: 1, maxLength: 1000 }, path: { type: "string", minLength: 1, maxLength: 1000 },
       branch: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._/-]*$", maxLength: 200 },
       head: { type: "string", pattern: "^[a-f0-9]{40}$" },
+    } } },
+  remoteWorktrees: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
+    required: ["host", "task", "path"], properties: {
+      host: { type: "string", const: "bbdev" }, task: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$", maxLength: 200 },
+      path: { type: "string", pattern: "^/[^\\u0000]*$", maxLength: 1000 },
     } } },
   resources: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
     required: ["kind", "task", "lease"], properties: {
@@ -164,8 +171,20 @@ export async function registerWorkflow(app: FastifyInstance) {
     const report = request.body as any;
     if ((report.status === "completed" || report.stage === "done") && !report.summary?.trim()) return reply.code(400).send({ error: "完成时请填写结果摘要" });
     const previous = store.get(id)!;
-    if (previous.archivedAt || previous.cleanup.state === "released" && (report.worktrees || report.resources || report.deliveries)) return reply.code(409).send({ error: "资源已收尾，请在新事项中登记后续工作" });
+    if (previous.archivedAt || previous.cleanup.state === "released" && (report.worktrees || report.remoteWorktrees || report.resources || report.deliveries)) return reply.code(409).send({ error: "资源已收尾，请在新事项中登记后续工作" });
     if (report.worktrees?.some((worktree: any) => !within(cwd, worktree.path) || !within(cwd, worktree.repo))) return reply.code(400).send({ error: "工作区须位于工作流项目目录内" });
+    const localWorktrees = report.worktrees ?? previous.worktrees;
+    if (localWorktrees.length) {
+      try { report.worktrees = await Promise.all(localWorktrees.map((worktree: any) =>
+        worktree.releasedAt || worktree.removalStartedAt ? worktree : inspectRegisteredWorktree(worktree, cwd))); }
+      catch { return reply.code(409).send({ error: "本机工作区登记未确认，保留原登记" }); }
+    }
+    if (report.remoteWorktrees || report.resources?.some((resource: any) => resource.kind === "bbdev-lease")) {
+      try {
+        report.remoteWorktrees = await inspectRemoteWorktrees(report.remoteWorktrees ?? previous.remoteWorktrees ?? [], report.resources ?? previous.resources);
+        report.remoteWorktreesSync = { checkedAt: new Date().toISOString(), error: null };
+      } catch { return reply.code(503).send({ error: "远端工作区登记未确认，保留原登记" }); }
+    }
     if (report.issue) {
       if (previous.issue?.number === report.issue.number) report.issue = { ...previous.issue, ...report.issue };
       const base = process.env.CODEX_WORKFLOW_ISSUE_URL;
@@ -225,6 +244,8 @@ export async function registerWorkflow(app: FastifyInstance) {
       }
       if (++ticks % 15 === 0) {
         refreshAll();
+      } else if (ticks % 3 === 0) {
+        await Promise.allSettled(tasks.map(task => refreshRemoteWorktrees(store, task.id)));
       }
     } finally { polling = false; }
   }, 10000);
