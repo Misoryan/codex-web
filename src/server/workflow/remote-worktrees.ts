@@ -9,9 +9,20 @@ const snapshot = (task: ReturnType<WorkflowStore["get"]>) => JSON.stringify([tas
 export async function inspectRemoteWorktrees(worktrees: RemoteRegistration[], resources: Resource[], cleanup = false) {
   const helper = process.env.CODEX_WORKFLOW_REMOTE_WORKTREES_HELPER;
   if (!helper) throw Error("远端工作区核对服务未配置");
-  const result = JSON.parse(await command(process.env.CODEX_WORKFLOW_PYTHON ?? "python",
+  let output: string;
+  try { output = await command(process.env.CODEX_WORKFLOW_PYTHON ?? "python",
     ["-X", "utf8", helper, "--request", JSON.stringify({ worktrees, ...(cleanup ? { cleanup: true } : {}),
-      resources: resources.filter(resource => resource.kind === "bbdev-lease") })]));
+      resources: resources.filter(resource => resource.kind === "bbdev-lease") })]);
+  } catch (error) {
+    let reason = "远端工作区服务暂时不可用，请稍后重试";
+    try {
+      const message = JSON.parse((error as any).stdout).error;
+      if (typeof message === "string" && message.length > 0 && message.length <= 200 && !/[\r\n]/.test(message)) reason = message;
+    } catch { /* 子进程参数和堆栈不进入用户提示。 */ }
+    throw Error(reason);
+  }
+  const result = JSON.parse(output);
+  if (typeof result.error === "string") throw Error(result.error);
   if (!Array.isArray(result.worktrees)) throw Error("远端工作区核对结果不完整");
   for (const worktree of result.worktrees) {
     if (worktree.host !== "bbdev" || typeof worktree.task !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(worktree.task) ||

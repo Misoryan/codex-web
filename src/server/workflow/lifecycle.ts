@@ -72,6 +72,9 @@ export class WorkflowLifecycle {
     this.store.update(task.id, { cleanup: { state: "pending", reason: "等待会话空闲后释放", checkedAt: new Date().toISOString() } });
     try {
       await this.assertIdle(task, undefined, manual);
+      if (manual && task.remoteWorktrees?.some(worktree => worktree.cleanup.state === "unregistered")) {
+        throw Error("远端工作区尚未登记回收，请先在对应会话完成交付并登记回收");
+      }
       if (manual && task.worktrees.some(worktree => !worktree.releasedAt) &&
           (!task.deliveries.length || task.deliveries.some(delivery => !delivery.devMergedAt))) throw Error("任务工作区的交付尚未全部合入，请先合入后再清理");
       const resourceOrder = task.resources.map((resource, index) => ({ resource, index }))
@@ -117,7 +120,7 @@ export class WorkflowLifecycle {
       }
       const current = this.store.get(task.id)!;
       if (current.remoteWorktreesSync?.error || current.remoteWorktrees?.some(worktree => worktree.cleanup.state !== "cleaned")) {
-        this.store.update(task.id, { cleanup: { state: "pending", reason: current.remoteWorktreesSync?.error ?? "远端工作区等待 bbdev 回收确认", checkedAt: new Date().toISOString() } });
+        this.store.update(task.id, { cleanup: { state: "pending", reason: current.remoteWorktreesSync?.error || current.remoteWorktrees?.find(worktree => worktree.cleanup.state !== "cleaned")?.cleanup.reason || "远端工作区等待 bbdev 回收确认", checkedAt: new Date().toISOString() } });
         return;
       }
       this.store.update(task.id, { cleanup: { state: "released", reason: "", releasedAt: new Date().toISOString() } }, "resources.released");

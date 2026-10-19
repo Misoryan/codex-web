@@ -712,7 +712,7 @@ scenario('手动归档等待远端回收确认，失败不归档并支持重新�
   const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote]});
   const lifecycle=new WorkflowLifecycle(store,scenarioRoot);
   process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
-  await assert.rejects(lifecycle.archiveAndClean(task.id),/远端工作区等待/);
+  await assert.rejects(lifecycle.archiveAndClean(task.id),/^Error: lease active$/);
   assert.equal(store.get(task.id).archivedAt,null);assert.equal(archived.length,0);
   process.env.WORKFLOW_FIXTURE_REMOTE_RESULT='fail';
   await assert.rejects(lifecycle.archiveAndClean(task.id));
@@ -730,6 +730,37 @@ scenario('手动归档保留其他空闲事项仍关联的工作区', async () =
   await assert.rejects(new WorkflowLifecycle(store,scenarioRoot).archiveAndClean(task.id),/其他事项关联/);
   assert(fs.existsSync(fixture.target));assert.equal(git(fixture.repo,'rev-parse','feature-fixture'),fixture.head);
   assert.equal(archived.length,0);assert.equal(store.get(task.id).archivedAt,null);
+});
+
+scenario('未登记的远端工作区在释放测试资源前阻止归档，返回具体原因', async () => {
+  const store=storeFixture(),threadId=threadFixture(scenarioRoot,'notLoaded');
+  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'unregistered',reason:'',checkedAt:null}};
+  const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote],resources:[{kind:'bbdev-lease',task:'fixture-owned',lease:'123456abcdef',released:false}]});
+  process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
+  await assert.rejects(new WorkflowLifecycle(store,scenarioRoot).archiveAndClean(task.id),/^Error: 远端工作区尚未登记回收，请先在对应会话完成交付并登记回收$/);
+  assert.equal(helperCalls().length,0);assert.equal(store.get(task.id).resources[0].released,false);
+  assert.equal(store.get(task.id).archivedAt,null);assert.equal(archived.length,0);
+  assert.equal(store.get(task.id).error,store.get(task.id).cleanup.reason);
+});
+
+scenario('远端清理子进程拒绝时接口保留原因，不返回执行命令，失败后可以重试', async () => {
+  const app=require('fastify')();await app.register(registerWorkflow);await app.ready();
+  const store=new WorkflowStore(process.env.CODEX_WORKFLOW_DATA);stores.add(store);
+  const threadId=threadFixture(scenarioRoot,'notLoaded');
+  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'registered',reason:'',checkedAt:null}};
+  const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote]});
+  const service=JSON.parse(fs.readFileSync(path.join(process.env.CODEX_WORKFLOW_DATA,'service.json'),'utf8'));
+  const request={method:'POST',url:prefix+'/'+task.id+'/archive',headers:{authorization:'Bearer '+service.agentToken}};
+  process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
+  process.env.WORKFLOW_FIXTURE_CLEANUP_ERROR='远端工作区的 Git 身份已变化，请重新核对登记';
+  try {
+    const response=await app.inject(request);
+    assert.equal(response.statusCode,409);assert.equal(response.json().error,process.env.WORKFLOW_FIXTURE_CLEANUP_ERROR);
+    assert.equal(store.get(task.id).error,response.json().error);assert.equal(store.get(task.id).archivedAt,null);assert.equal(archived.length,0);
+    delete process.env.WORKFLOW_FIXTURE_CLEANUP_ERROR;
+    process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[{...remote,cleanup:{state:'cleaned',reason:'',checkedAt:null}}]});
+    const retry=await app.inject(request);assert.equal(retry.statusCode,200);assert(retry.json().archivedAt);assert.equal(retry.json().error,null);
+  } finally {delete process.env.WORKFLOW_FIXTURE_CLEANUP_ERROR;await app.close();}
 });
 
 async function waitForReconciliation(id, after) {
@@ -779,7 +810,7 @@ function cleanupFixture(directory) {
   process.env.CODEX_WORKFLOW_MOBIUS_HELPER = helper;
   process.env.CODEX_WORKFLOW_RESOURCE_HELPER = helper;
   const remoteHelper=path.join(root,'remote-helper.py');
-  fs.writeFileSync(remoteHelper,`import os,sys\nvalue=os.environ['WORKFLOW_FIXTURE_REMOTE_RESULT']\nif value=='fail':sys.exit(1)\nprint(value)\n`);
+  fs.writeFileSync(remoteHelper,`import json,os,sys\nvalue=os.environ['WORKFLOW_FIXTURE_REMOTE_RESULT']\nif value=='fail':sys.exit(1)\nif json.loads(sys.argv[sys.argv.index('--request')+1]).get('cleanup') and os.environ.get('WORKFLOW_FIXTURE_CLEANUP_ERROR'):\n print(json.dumps({'error':os.environ['WORKFLOW_FIXTURE_CLEANUP_ERROR']}));sys.exit(1)\nprint(value)\n`);
   process.env.CODEX_WORKFLOW_REMOTE_WORKTREES_HELPER=remoteHelper;
   process.env.CODEX_WORKFLOW_PYTHON = process.env.CODEX_WORKFLOW_TEST_PYTHON || 'python';
   let failures = 0;
