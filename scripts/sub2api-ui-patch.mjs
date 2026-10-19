@@ -20,7 +20,7 @@ export async function patchSub2ApiTrigger(source) {
   }
   body = body.replace('function iPo(e) {', 'function iPo(e) {\n  let codexWebSavedProfile = codexWebUsePlatformProfile();');
   const hook = (await fs.readFile(new URL('../src/browser/profile-identity.js',import.meta.url),'utf8')).replace('export function createPlatformProfileHook','function createPlatformProfileHook');
-  return source.slice(0,fn.getStart(ast))+body+source.slice(fn.end)+`\n/* CODEX_SUB2API_TRIGGER */\n${hook}\nvar codexWebUsePlatformProfile = createPlatformProfileHook(cPo);\n`;
+  return source.slice(0,fn.getStart(ast))+body+source.slice(fn.end)+`\n/* CODEX_SUB2API_TRIGGER */\n${hook}\nvar codexWebPlatformProfileHook;\nfunction codexWebUsePlatformProfile() {\n  codexWebPlatformProfileHook ??= createPlatformProfileHook(cPo);\n  return codexWebPlatformProfileHook();\n}\n`;
 }
 
 export async function patchSub2ApiUsage(source) {
@@ -40,6 +40,14 @@ export async function patchSub2ApiUsage(source) {
   once('usageItems: k,', 'usageItems: (0,$.jsx)(CodexSub2ApiUsage,{active:a}),');
   once('let ir = !l && Hn,', 'let ir = (0,$.jsx)(CodexSub2ApiUsage,{active:a}),');
   source = source.slice(0,fn.getStart(ast)) + body + source.slice(fn.end);
+  const layout = ast.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'Wi');
+  if (!layout) throw Error('Desktop profile menu layout changed');
+  let layoutBody = layout.getText(ast);
+  for (const [from, to] of [['let C = S,', 'let C = null,'], ['SubText: k,', 'SubText: null,']]) {
+    if (layoutBody.split(from).length !== 2) throw Error('Desktop profile identity anchor changed: ' + from);
+    layoutBody = layoutBody.replace(from, to);
+  }
+  source = source.slice(0,layout.getStart(ast)) + layoutBody + source.slice(layout.end);
   const component = (await fs.readFile(new URL('../src/browser/sub2api-usage.js',import.meta.url),'utf8')).replace('export function createSub2ApiUsage','function createSub2ApiUsage');
   return `import CodexUsageIcon from './gauge-BbF64vwF-3da22a60689a.js';\nimport {KT as CodexDisclosure} from './app-shared-8bd9d0399038.js';\n` + source + `
 /* CODEX_SUB2API_USAGE_START */

@@ -3,19 +3,29 @@ const assert = require('node:assert/strict');
 const {buildSync} = require('esbuild');
 const {chromium} = require('@playwright/test');
 
-const bundle = buildSync({stdin: {contents: `
+async function main() {
+  const {patchSub2ApiTrigger} = await import('./sub2api-ui-patch.mjs');
+  const trigger = await patchSub2ApiTrigger(`
+var cPo;
+function iPo(e) {
+  let De = Ee, unused;
+  let ke = Oe, other;
+  const unavailable = ke == null || j;
+  return {src: ce ? null : me, profile: ke};
+}
+`);
+  const bundle = buildSync({stdin: {contents: `
 import React from 'react';
 import {createRoot} from 'react-dom/client';
-import {createPlatformProfileHook} from './src/browser/profile-identity.js';
-const useProfile = createPlatformProfileHook(React);
+${trigger}
+cPo = React;
 function Profile() {
-  const profile = useProfile();
+  const profile = iPo({}).profile;
   return React.createElement('output', null, JSON.stringify(profile));
 }
 createRoot(document.getElementById('root')).render(React.createElement(React.Fragment, null, React.createElement(Profile), React.createElement(Profile)));
 `, resolveDir: process.cwd(), loader: 'js'}, bundle: true, write: false, format: 'iife', target: 'es2022'}).outputFiles[0].text;
 
-async function main() {
   const server = http.createServer((request, response) => {
     response.setHeader('content-type', 'text/html;charset=utf-8');
     response.end('<!doctype html><div id="root"></div><script>' + bundle.replaceAll('</script', '<\\/script') + '</script>');
