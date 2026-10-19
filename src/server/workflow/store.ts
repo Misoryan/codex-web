@@ -5,13 +5,15 @@ import { isDeepStrictEqual } from "node:util";
 
 const Database = require("better-sqlite3");
 export type Delivery = { repo: string; pr: number; url: string; base: string; release: string;
+  issueNumbers?: number[];
+  releaseProof?: { method: "ancestry" | "patch"; commit: string; checkedAt: string };
   state?: "OPEN" | "CLOSED" | "MERGED"; isDraft?: boolean; checkedAt?: string;
   head?: string; merge?: string; devMergedAt?: string; masterMergedAt?: string; error?: string };
 export type Worktree = { repo: string; path: string; branch: string; head: string;
   removalStartedAt?: string; removedAt?: string; releasedAt?: string };
 export type Resource = { kind: "bbdev-lease" | "bedrock-client"; task: string; lease: string; slot?: number; released: boolean };
 export const remoteCleanupStates = ["unregistered", "registered", "retained", "eligible", "eligible_resume", "cleaning", "cleanup_failed", "cleaned"] as const;
-export type RemoteWorktree = { host: "bbdev"; task: string; path: string; branch: string; head: string;
+export type RemoteWorktree = { host: "bbdev"; task: string; path: string; branch: string; head: string; origin?: string;
   cleanup: { state: typeof remoteCleanupStates[number]; reason: string; checkedAt: string | null } };
 export type Workflow = {
   id: string; title: string; kind: string; prompt: string; cwd: string;
@@ -24,6 +26,7 @@ export type Workflow = {
   issue: { number: number; url: string; title?: string; status?: string; ancestors?: { number: number; title: string; url: string }[] } | null; project: string;
   relatedIssues?: { number: number; title?: string; url: string; status?: string }[];
   workflowSource?: "issue-fix" | "workflow";
+  publication?: { checkedAt: string; error: string | null; issues: { number: number; isLeaf?: boolean; status: string; desired: string | null; error: string | null }[] };
   deliveries: Delivery[]; worktrees: Worktree[]; resources: Resource[];
   remoteWorktrees?: RemoteWorktree[]; remoteWorktreesSync?: { checkedAt: string; error: string | null };
   cleanup: { state: "none" | "pending" | "blocked" | "released"; reason: string; checkedAt?: string; releasedAt?: string };
@@ -81,7 +84,7 @@ export class WorkflowStore {
     const next = { ...previous, ...patch };
     if (JSON.stringify(next) === JSON.stringify(previous)) return previous;
     const inspected = event === "remote-worktrees.checked" ? ["remoteWorktrees", "remoteWorktreesSync"]
-      : event === "delivery.checked" ? ["deliveries"] : undefined;
+      : event === "delivery.checked" ? ["deliveries", "publication", "mobius", "relatedIssues", "stage", "status"] : undefined;
     if (inspected) {
       const content = (task: Workflow) => JSON.parse(JSON.stringify(
         Object.fromEntries(inspected.map(key => [key, task[key as keyof Workflow]])),

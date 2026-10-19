@@ -17,7 +17,9 @@ externalExecFile[promisify.custom] = async (executable, args, options) => {
   if (executable !== 'gh') return promisify(childProcess.execFile)(executable, args, options);
   githubCalls.push(args);
   let value;
-  if (args[0] === 'pr') value = github.get(`${args[4]}#${args[2]}`)?.pr;
+  if (args[0] === 'pr' && args[1] === 'list') value = [];
+  else if (args[0] === 'pr') value = github.get(`${args[4]}#${args[2]}`)?.pr;
+  else if (args[0] === 'repo') value = {defaultBranchRef:{name:'master'}};
   else if (args[0] === 'api') value = github.get(args[1]);
   assert.notEqual(value, undefined, `Unregistered external GitHub request: ${args.join(' ')}`);
   value = await value;
@@ -48,6 +50,7 @@ const {WorkflowLifecycle} = load('lifecycle');
 const reconciliations = [];
 const originalReconcile = WorkflowLifecycle.prototype.reconcile;
 WorkflowLifecycle.prototype.reconcile = function(id, archive) {
+  this.invalidatePublication();
   const operation = originalReconcile.call(this, id, archive);
   reconciliations.push({id, operation, startedAt: Date.now()});
   return operation;
@@ -88,7 +91,8 @@ function deliveryFixture(pr = 1, state = 'OPEN', release = false, head = 'a'.rep
     mergeCommit: state === 'MERGED' ? {oid: merge} : null, mergedAt: state === 'MERGED' ? '2026-01-02T03:04:05Z' : null,
     url: `https://github.com/${repo}/pull/${pr}`}});
   github.set(`repos/${repo}/compare/${merge}...dev`, {status: 'ahead'});
-  github.set(`repos/${repo}/compare/${merge}...master`, {status: release ? 'ahead' : 'diverged'});
+  github.set(`repos/${repo}/commits/master`, {sha:'f'.repeat(40)});
+  github.set(`repos/${repo}/compare/${merge}...${'f'.repeat(40)}`, {status: release ? 'ahead' : 'behind'});
   return {repo, pr, url: `https://github.com/${repo}/pull/${pr}`, base: 'dev', release: 'master'};
 }
 function worktreeFixture() {
@@ -113,7 +117,7 @@ function worktreeFixture() {
 }
 function helperCalls() {
   const file = process.env.WORKFLOW_FIXTURE_CALLS;
-  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse).filter(call => !call.inspect) : [];
 }
 function resetScenario() {
   reconciliations.length = 0;
@@ -302,9 +306,9 @@ scenario('进入验收才请求待测试；Möbius 返回状态与目标状态�
   assert.equal(result.mobius.status, 'READY_FOR_TEST');
   assert.equal(helperCalls()[0].desired, 'READY_FOR_TEST');
   assert.equal(archived.length, 0);
-  process.env.WORKFLOW_FIXTURE_MOBIUS_FAIL = 'true';
+  process.env.WORKFLOW_FIXTURE_MOBIUS_FAIL = 'read';
   const failed = await reconcile(store, task.id);
-  assert.match(failed.mobius.error, /未同步/);
+  assert.match(failed.mobius.error, /核对/);
   assert.equal(failed.mobius.status, 'READY_FOR_TEST', 'A failed write must retain the last confirmed state');
 });
 
@@ -328,13 +332,13 @@ scenario('两个 PR 必须全部合 dev 才待发布，全部进 master 才完�
   assert.deepEqual(helperCalls().map(c => c.desired), ['READY_FOR_TEST', 'READY_FOR_RELEASE', 'READY_FOR_RELEASE', 'DONE']);
 });
 
-scenario('仅索引的事项只读 Möbius，不因旧会话阶段写业务状态或释放资源', async () => {
+scenario('普通导入会话不因事项编号参与自动核对、写业务状态或释放资源', async () => {
   const store = storeFixture(), fixture = worktreeFixture();
   const {task} = makeTask(store, {managed: false, imported: true, stage: 'done', status: 'completed',
     issue: {number: 103, url: 'https://issues.example.invalid/103'}, deliveries: [deliveryFixture(1, 'MERGED', true, fixture.head)], worktrees: [fixture.worktree]});
   const result = await reconcile(store, task.id);
-  assert.equal(result.mobius.desired, null); assert.equal(result.mobius.status, 'IN_PROGRESS');
-  assert.equal(helperCalls()[0].desired, null); assert.equal(result.archivedAt, null);
+  assert.equal(result.mobius.desired, null); assert.equal(result.mobius.status, null);
+  assert.equal(helperCalls().length, 0); assert.equal(result.archivedAt, null);
   assert(fs.existsSync(fixture.target)); assert.equal(result.cleanup.state, 'none');
 });
 
@@ -408,7 +412,7 @@ scenario('未加载会话最后一轮已完成，仍不能以历史结果授权�
 scenario('master 查询失败不否定已核实的 dev 合入，可释放干净工作区但不能归档', async () => {
   const store = storeFixture(), fixture = worktreeFixture();
   const delivery = deliveryFixture(1, 'MERGED', false, fixture.head);
-  github.set('repos/fixture/workflow/compare/' + '1'.padStart(40, '0') + '...master', Error('Fixture unavailable'));
+  github.set('repos/fixture/workflow/compare/' + '1'.padStart(40, '0') + '...' + 'f'.repeat(40), Error('Fixture unavailable'));
   const {task} = makeTask(store, {deliveries: [delivery], worktrees: [fixture.worktree]});
   const result = await reconcile(store, task.id);
   assert(result.deliveries[0].devMergedAt); assert.equal(result.deliveries[0].masterMergedAt, undefined);
@@ -466,7 +470,7 @@ scenario('资源释放拒绝时保留工作区，重试仅释放登记的资源�
 
 scenario('远端工作区未确认回收时保持待收尾，确认 cleaned 后才归档', async () => {
   const store=storeFixture(), id=threadFixture(scenarioRoot);
-  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'retained',reason:'lease active',checkedAt:null}};
+  const remote={host:'bbdev',origin:'https://github.com/fixture/workflow.git',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'retained',reason:'lease active',checkedAt:null}};
   const {task}=makeTask(store,{threadId:id,deliveries:[deliveryFixture(1,'MERGED',true)],remoteWorktrees:[remote]});
   process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
   let result=await reconcile(store,task.id);
@@ -481,7 +485,7 @@ scenario('远端工作区未确认回收时保持待收尾，确认 cleaned 后�
 
 scenario('远端读失败保留上次工作区，阻止把已到 master 的事项误判为全部收尾', async () => {
   const store=storeFixture(),id=threadFixture(scenarioRoot);
-  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'cleaned',reason:'',checkedAt:null}};
+  const remote={host:'bbdev',origin:'https://github.com/fixture/workflow.git',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'cleaned',reason:'',checkedAt:null}};
   const {task}=makeTask(store,{threadId:id,deliveries:[deliveryFixture(1,'MERGED',true)],remoteWorktrees:[remote]});
   process.env.WORKFLOW_FIXTURE_REMOTE_RESULT='fail';
   const result=await reconcile(store,task.id);
@@ -510,7 +514,7 @@ scenario('已确认 master 完成后 GitHub 暂不可读，只读 Möbius 当前
   process.env.WORKFLOW_FIXTURE_MOBIUS_STATUS = 'DONE';
   result = await reconcile(store, task.id, false);
   assert.equal(result.mobius.status, 'DONE'); assert.equal(result.mobius.desired, null);
-  assert.deepEqual(helperCalls().map(call => call.desired), ['DONE', null]);
+  assert.deepEqual(helperCalls().map(call => call.desired), ['DONE']);
 });
 
 for (const isDraft of [false,true]) scenario(`HTTP 登记${isDraft?'草稿':'普通'} dev PR 后，即使仍在实现阶段也同步待测试并保存核验证据`, async () => {
@@ -548,7 +552,7 @@ for (const condition of ['closed','unavailable','incomplete','wrong-base']) scen
   const {task}=makeTask(store,{threadId:id,stage:'verification',issue:{number:111,url:'https://issues.example.invalid/111'},
     deliveries:[{...delivery,devMergedAt:'2026-01-01T00:00:00Z',masterMergedAt:'2026-01-01T00:00:00Z'}]});
   const result=await reconcile(store,task.id);
-  assert.equal(result.mobius.desired,null);assert.equal(result.mobius.status,'IN_PROGRESS');assert.equal(helperCalls()[0].desired,null);
+  assert.equal(result.mobius.desired,null);assert.equal(result.mobius.status,'IN_PROGRESS');assert.equal(helperCalls().length,0);
   assert.equal(result.deliveries[0].devMergedAt,undefined);assert.equal(result.deliveries[0].masterMergedAt,undefined);
   assert(Number.isFinite(Date.parse(result.deliveries[0].checkedAt)));
   if(condition==='closed') assert.equal(result.deliveries[0].state,'CLOSED');
@@ -624,7 +628,7 @@ scenario('HTTP caller 伪造 dev/master 合入时间不能把未合 PR 同步为
   } finally { await app.close(); }
 });
 
-scenario('HTTP 核对 GitHub 期间拒绝并发覆盖登记，完成核对后保留原登记', async () => {
+scenario('HTTP 慢速 GitHub 核对不阻塞进度登记，旧核对不能覆盖新上报', async () => {
   const app = require('fastify')(), id = threadFixture(scenarioRoot);
   const delivery = deliveryFixture(1, 'OPEN'), prResponse = github.get('fixture/workflow#1').pr;
   let finishGithub;
@@ -642,13 +646,14 @@ scenario('HTTP 核对 GitHub 期间拒绝并发覆盖登记，完成核对后保
       payload: {stage: 'verification', issue: {number: 109}, deliveries: [{repo: delivery.repo, pr: delivery.pr, base: 'dev', release: 'master'}]}});
     assert.equal(first.statusCode, 200, first.body);
     const concurrent = await app.inject({method: 'POST', url, headers, payload: {deliveries: [], summary: 'Concurrent replacement'}});
-    assert.equal(concurrent.statusCode, 409); assert.match(concurrent.json().error, /正在核对/);
+    assert.equal(concurrent.statusCode, 200, concurrent.body);
     finishGithub();
     await waitForReconciliation(context.workflowId,beforeReport);
+    await Promise.all(reconciliations.slice(beforeReport).map(item => item.operation));
     const observed = (await app.inject(prefix + '/' + context.workflowId)).json();
     assert.equal(observed.mobius.status,'READY_FOR_TEST');
-    assert.equal(observed.deliveries.length, 1); assert.equal(observed.deliveries[0].pr, 1);
-    assert.notEqual(observed.summary, 'Concurrent replacement');
+    assert.equal(observed.deliveries.length, 0);
+    assert.equal(observed.summary, 'Concurrent replacement');
   } finally { finishGithub?.(); await app.close(); }
 });
 
@@ -708,7 +713,7 @@ scenario('手动归档接口核对来源并回读归档结果，失败可重试�
 
 scenario('手动归档等待远端回收确认，失败不归档并支持重新核对', async () => {
   const store=storeFixture(),threadId=threadFixture(scenarioRoot,'notLoaded');
-  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'retained',reason:'lease active',checkedAt:null}};
+  const remote={host:'bbdev',origin:'https://github.com/fixture/workflow.git',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'retained',reason:'lease active',checkedAt:null}};
   const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote]});
   const lifecycle=new WorkflowLifecycle(store,scenarioRoot);
   process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
@@ -734,7 +739,7 @@ scenario('手动归档保留其他空闲事项仍关联的工作区', async () =
 
 scenario('未登记的远端工作区在释放测试资源前阻止归档，返回具体原因', async () => {
   const store=storeFixture(),threadId=threadFixture(scenarioRoot,'notLoaded');
-  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'unregistered',reason:'',checkedAt:null}};
+  const remote={host:'bbdev',origin:'https://github.com/fixture/workflow.git',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'unregistered',reason:'',checkedAt:null}};
   const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote],resources:[{kind:'bbdev-lease',task:'fixture-owned',lease:'123456abcdef',released:false}]});
   process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
   await assert.rejects(new WorkflowLifecycle(store,scenarioRoot).archiveAndClean(task.id),/^Error: 远端工作区尚未登记回收，请先在对应会话完成交付并登记回收$/);
@@ -747,7 +752,7 @@ scenario('远端清理子进程拒绝时接口保留原因，不返回执行命�
   const app=require('fastify')();await app.register(registerWorkflow);await app.ready();
   const store=new WorkflowStore(process.env.CODEX_WORKFLOW_DATA);stores.add(store);
   const threadId=threadFixture(scenarioRoot,'notLoaded');
-  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'registered',reason:'',checkedAt:null}};
+  const remote={host:'bbdev',origin:'https://github.com/fixture/workflow.git',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'registered',reason:'',checkedAt:null}};
   const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote]});
   const service=JSON.parse(fs.readFileSync(path.join(process.env.CODEX_WORKFLOW_DATA,'service.json'),'utf8'));
   const request={method:'POST',url:prefix+'/'+task.id+'/archive',headers:{authorization:'Bearer '+service.agentToken}};
@@ -806,7 +811,7 @@ function cleanupFixture(directory) {
   fs.mkdirSync(temporaryParent, {recursive: true});
   root = fs.mkdtempSync(path.join(temporaryParent, 'workflow-lifecycle-'));
   const helper = path.join(root, 'external-helper.py');
-  fs.writeFileSync(helper, `import argparse,json,os,sys,time\np=argparse.ArgumentParser()\nfor key in ['number','desired','kind','task','lease','slot']: p.add_argument('--'+key)\na=vars(p.parse_args())\nwith open(os.environ['WORKFLOW_FIXTURE_CALLS'],'a',encoding='utf8') as f: f.write(json.dumps(a)+'\\n')\nif a['number']:\n time.sleep(float(os.environ.get('WORKFLOW_FIXTURE_MOBIUS_DELAY_MS','0'))/1000)\n if os.environ.get('WORKFLOW_FIXTURE_MOBIUS_FAIL'): sys.exit('Fixture Mobius unavailable')\n print(json.dumps({'status':a['desired'] or os.environ['WORKFLOW_FIXTURE_MOBIUS_STATUS']}))\nelse: print(json.dumps({'released':os.environ['WORKFLOW_FIXTURE_RESOURCE_RELEASED']=='true','error':'Fixture lease still active'}))\n`);
+  fs.writeFileSync(helper, `import argparse,json,os,sys,time\np=argparse.ArgumentParser()\nfor key in ['number','desired','kind','task','lease','slot','expected-status','expected-prs']: p.add_argument('--'+key)\np.add_argument('--inspect',action='store_true')\na=vars(p.parse_args())\nwith open(os.environ['WORKFLOW_FIXTURE_CALLS'],'a',encoding='utf8') as f: f.write(json.dumps(a)+'\\n')\nif a['number']:\n time.sleep(float(os.environ.get('WORKFLOW_FIXTURE_MOBIUS_DELAY_MS','0'))/1000)\n if os.environ.get('WORKFLOW_FIXTURE_MOBIUS_FAIL') and (os.environ['WORKFLOW_FIXTURE_MOBIUS_FAIL']=='read' or not a['inspect']): sys.exit('Fixture Mobius unavailable')\n print(json.dumps({'number':int(a['number']),'title':'Fixture issue','isLeaf':True,'pullRequests':[], 'status':a['desired'] or os.environ['WORKFLOW_FIXTURE_MOBIUS_STATUS']}))\nelse: print(json.dumps({'released':os.environ['WORKFLOW_FIXTURE_RESOURCE_RELEASED']=='true','error':'Fixture lease still active'}))\n`);
   process.env.CODEX_WORKFLOW_MOBIUS_HELPER = helper;
   process.env.CODEX_WORKFLOW_RESOURCE_HELPER = helper;
   const remoteHelper=path.join(root,'remote-helper.py');

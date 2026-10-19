@@ -1,30 +1,19 @@
 import path from "node:path";
+import { PublicationMonitor } from "./publication";
 import { command, inspectDelivery, removeWorktree } from "./git";
 import { within } from "./indexer";
 import { workflowHost, workflowManager, workflowSnapshot } from "./host";
 import type { Workflow, WorkflowStore } from "./store";
 import { refreshRemoteWorktrees, cleanRemoteWorktrees } from "./remote-worktrees";
 
-export function desiredIssueStatus(task: Workflow) {
-  if (task.deliveries.some(delivery => delivery.error)) return null;
-  if (task.deliveries.length) {
-    if (task.deliveries.some(delivery => !delivery.checkedAt || !delivery.state || typeof delivery.isDraft !== "boolean" || delivery.state === "CLOSED")) return null;
-    if (task.deliveries.every(delivery => delivery.state === "MERGED" && delivery.masterMergedAt)) return "DONE";
-    if (task.deliveries.every(delivery => delivery.state === "MERGED" && delivery.devMergedAt)) return "READY_FOR_RELEASE";
-    if (task.deliveries.some(delivery => delivery.state === "OPEN" && delivery.base === "dev")) return "READY_FOR_TEST";
-    return null;
-  } else if (task.stage === "done" && task.kind === "research" && task.status === "completed") return "DONE";
-  if (["verification", "delivery"].includes(task.stage)) return "READY_FOR_TEST";
-  if (task.status === "blocked") return "BLOCKED";
-  if (task.stage === "implementation") return "IN_PROGRESS";
-  return null;
-}
-
 export class WorkflowLifecycle {
   private locks = new Set<string>();
   private pending = new Set<Promise<unknown>>();
-  constructor(private store: WorkflowStore, private cwd: string) {}
-  isBusy(id: string) { return this.locks.has(id); }
+  private publication: PublicationMonitor;
+  constructor(private store: WorkflowStore, private cwd: string) { this.publication = new PublicationMonitor(store); }
+  refreshPublications(force = false) { return this.publication.refresh(force); }
+  invalidatePublication() { this.publication.invalidate(); }
+  isBusy(id: string) { return this.locks.has(id) || this.publication.isBusy(id); }
   async drain() { await Promise.allSettled([...this.pending]); }
 
   async assertIdle(task: Workflow, target?: string, allowUnloaded = false) {
@@ -49,25 +38,8 @@ export class WorkflowLifecycle {
     }
   }
 
-  private async syncIssue(task: Workflow) {
-    if (!task.issue) return;
-    const desired = task.managed ? desiredIssueStatus(task) : null;
-    try {
-      const helper = process.env.CODEX_WORKFLOW_MOBIUS_HELPER;
-      if (!helper) throw Error("Möbius 同步服务未配置");
-      const result = JSON.parse(await command(process.env.CODEX_WORKFLOW_PYTHON ?? "python",
-        ["-X", "utf8", helper, "--number", String(task.issue.number), ...(desired ? ["--desired", desired] : [])]));
-      this.store.update(task.id, { mobius: { status: result.status, desired, checkedAt: new Date().toISOString(), error: null } },
-        result.status !== task.mobius.status ? "issue.synced" : undefined);
-    } catch (error) {
-      let reason = "暂时无法连接同步服务";
-      try { reason = JSON.parse((error as any).stdout).error ?? reason; } catch { /* Keep subprocess details out of the page. */ }
-      this.store.update(task.id, { mobius: { ...task.mobius, desired, error: "Möbius 状态未同步：" + reason } });
-    }
-  }
-
   private async release(task: Workflow, manual = false) {
-    if (!manual && (!task.managed || !task.deliveries.length || !task.deliveries.every(d => d.devMergedAt))) return;
+    if (!manual && (!task.managed || task.publication?.error || !task.deliveries.length || !task.deliveries.every(d => d.devMergedAt && (!d.error || d.error === "发布分支暂时无法核对")))) return;
     if (task.cleanup.state === "released") return;
     this.store.update(task.id, { cleanup: { state: "pending", reason: "等待会话空闲后释放", checkedAt: new Date().toISOString() } });
     try {
@@ -190,23 +162,18 @@ export class WorkflowLifecycle {
 
   private async run(id: string, archive: boolean) {
     if (this.locks.has(id)) return this.store.get(id);
+    const initial = this.store.get(id);
+    if (!initial || initial.archivedAt) return initial;
+    await refreshRemoteWorktrees(this.store, id);
+    await this.publication.refresh();
+    if (this.locks.has(id)) return this.store.get(id);
     this.locks.add(id);
     try {
       let task = this.store.get(id)!;
       if (!task || task.archivedAt) return task;
-      await refreshRemoteWorktrees(this.store, id);
-      task = this.store.get(id)!;
-      const deliveries = [];
-      for (const delivery of task.deliveries) {
-        try { deliveries.push(await inspectDelivery(delivery)); }
-        catch { deliveries.push({ repo: delivery.repo, pr: delivery.pr, url: delivery.url, base: delivery.base, release: delivery.release, checkedAt: new Date().toISOString(), error: "GitHub 交付记录暂时无法核对" }); }
-      }
-      task = this.store.update(id, { deliveries }, "delivery.checked");
-      await this.syncIssue(task);
-      task = this.store.get(id)!;
       await this.release(task);
       task = this.store.get(id)!;
-      const done = task.deliveries.length ? task.deliveries.every(d => d.masterMergedAt) : task.kind === "research" && task.stage === "done" && task.status === "completed";
+      const done = task.stage === "done" && task.status === "completed" && !task.publication?.error && !task.publication?.issues.some(issue => (issue.isLeaf !== false || issue.number === task.issue?.number) && (issue.status !== "DONE" || issue.error));
       if (done && task.managed) task = this.store.update(id, { stage: "done", status: "completed" });
       if (archive && done && task.managed && (!task.issue || task.mobius.status === "DONE") &&
           !task.remoteWorktreesSync?.error && (!task.remoteWorktrees?.length || task.remoteWorktrees.every(worktree => worktree.cleanup.state === "cleaned")) &&

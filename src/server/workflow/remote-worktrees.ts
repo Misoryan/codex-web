@@ -28,6 +28,7 @@ export async function inspectRemoteWorktrees(worktrees: RemoteRegistration[], re
     if (worktree.host !== "bbdev" || typeof worktree.task !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(worktree.task) ||
         typeof worktree.path !== "string" || !path.posix.isAbsolute(worktree.path) || path.posix.normalize(worktree.path) !== worktree.path ||
         typeof worktree.branch !== "string" || typeof worktree.head !== "string" || !/^[a-f0-9]{40}$/.test(worktree.head) ||
+        worktree.origin !== undefined && (typeof worktree.origin !== "string" || worktree.origin.length > 2000 || /[\r\n]/.test(worktree.origin)) ||
         !remoteCleanupStates.includes(worktree.cleanup?.state) || typeof worktree.cleanup?.reason !== "string" ||
         worktree.cleanup.checkedAt !== null && (typeof worktree.cleanup.checkedAt !== "string" || !Number.isFinite(Date.parse(worktree.cleanup.checkedAt)))) {
       throw Error("远端工作区核对结果不完整");

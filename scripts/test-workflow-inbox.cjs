@@ -25,7 +25,7 @@ externalExecFile[promisify.custom] = async (executable, args, options) => {
   }
   if (args[2] === process.env.CODEX_WORKFLOW_MOBIUS_HELPER) {
     assert.deepEqual(args.slice(0, 2), ['-X', 'utf8']);
-    return {stdout: JSON.stringify({status: 'IN_PROGRESS'}), stderr: ''};
+    return {stdout: JSON.stringify({number:Number(args[args.indexOf('--number')+1]),title:'Fixture issue',isLeaf:true,pullRequests:[],status:args.includes('--desired')?args[args.indexOf('--desired')+1]:'IN_PROGRESS'}), stderr: ''};
   }
   assert.deepEqual(args, ['-X', 'utf8', process.env.CODEX_WORKFLOW_INBOX_HELPER]);
   const result = JSON.parse(fs.readFileSync(process.env.WORKFLOW_INBOX_FIXTURE_RESPONSE, 'utf8'));
@@ -284,7 +284,7 @@ for (const registered of [true, false]) scenario(`HTTP 标题上报为${register
     store.update(created.task.id, {threadId: randomUUID(), ...(registered ? {issue: issue(number)} : {})});
   });
   try {
-    if (registered) await waitFor(() => f.store.get(created.task.id).mobius.checkedAt);
+    if (registered) assert.equal(f.store.get(created.task.id).mobius.checkedAt,null,'Ordinary imported records do not trigger publication writes');
     f.metadata.length = 0;
     const response = await f.app.inject({method: 'POST', url: prefix + '/' + created.task.id + '/report',
       headers: {authorization: 'Bearer ' + created.token},
@@ -338,7 +338,7 @@ scenario('本机工作区登记以 Git 为准，后续只上报摘要也刷新�
   git(repo, 'config', 'user.name', 'Workflow Fixture'); git(repo, 'config', 'user.email', 'fixture@users.noreply.github.com');
   fs.writeFileSync(path.join(repo, 'tracked.txt'), 'base'); git(repo,'add','.'); git(repo,'commit','-m','Fixture base');
   git(repo,'worktree','add','-b','feature/task',target);
-  const report = payload => f.app.inject({method:'POST',url:prefix+'/'+created.task.id+'/report',headers:{authorization:'Bearer '+created.token},payload});
+  const report = async payload => {let response;await waitFor(async()=>{response=await f.app.inject({method:'POST',url:prefix+'/'+created.task.id+'/report',headers:{authorization:'Bearer '+created.token},payload});return response.statusCode!==409||!response.json().error.includes('正在核对');});return response;};
   try {
     let response = await report({worktrees:[{repo,path:target,branch:'invented',head:'f'.repeat(40)}]});
     assert.equal(response.statusCode,200,response.body);

@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Delivery, Worktree } from "./store";
 import { within } from "./indexer";
+import { containsReleasePatch } from "./release-proof";
 const execute = promisify(execFile);
 export async function command(executable: string, args: string[], cwd?: string) {
  const {stdout}=await execute(executable,args,{cwd,timeout:45000,windowsHide:true,maxBuffer:4*1024*1024,encoding:"utf8"});
@@ -11,24 +12,32 @@ export async function command(executable: string, args: string[], cwd?: string) 
 }
 export const git=(repo:string,...args:string[])=>command("git",["-C",repo,...args]);
 export function githubRepo(remote:string){return remote.match(/(?:github\.com[:/])([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/)?.[1]}
-export async function inspectDelivery(delivery:Delivery):Promise<Delivery>{
+export async function inspectDelivery(delivery:Delivery, releaseHeads = new Map<string, Promise<string>>()):Promise<Delivery>{
  if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(delivery.repo)||!/^\w[\w./-]*$/.test(delivery.release))throw Error("交付仓库或分支无效");
  const pr=JSON.parse(await command("gh",["pr","view",String(delivery.pr),"--repo",delivery.repo,"--json","state,isDraft,baseRefName,headRefOid,mergeCommit,mergedAt,url"]));
  if(!["OPEN","CLOSED","MERGED"].includes(pr.state)||typeof pr.isDraft!=="boolean")throw Error("PR 状态记录不完整");
- if(pr.baseRefName!==delivery.base||!["dev","main","master"].includes(delivery.base))throw Error("PR 的目标分支与登记内容不符");
- if(delivery.repo.toLowerCase().endsWith("/codefuncore")&&delivery.base!=="dev")throw Error("CodeFunCore 交付必须指向 dev");
- const next:Delivery={repo:delivery.repo,pr:delivery.pr,url:pr.url,base:delivery.base,release:delivery.release,head:pr.headRefOid,
+ const base=delivery.base||pr.baseRefName;
+ if(pr.baseRefName!==base||!["dev","main","master"].includes(base))throw Error("PR 的目标分支与登记内容不符");
+ const next:Delivery={repo:delivery.repo,pr:delivery.pr,url:pr.url,base,release:delivery.release,issueNumbers:delivery.issueNumbers,head:pr.headRefOid,
    state:pr.state,isDraft:pr.isDraft,checkedAt:new Date().toISOString()};
  if(pr.state!=="MERGED")return next;
- if(!pr.mergeCommit?.oid)throw Error("合入记录缺少提交编号");
- const dev=JSON.parse(await command("gh",["api",`repos/${delivery.repo}/compare/${pr.mergeCommit.oid}...${delivery.base}`]));
+ if(!/^[a-f0-9]{40}$/.test(pr.mergeCommit?.oid)||!Number.isFinite(Date.parse(pr.mergedAt)))throw Error("合入记录缺少提交编号或时间");
+ const dev=JSON.parse(await command("gh",["api",`repos/${delivery.repo}/compare/${pr.mergeCommit.oid}...${base}`]));
  if(!["ahead","identical"].includes(dev.status))throw Error("合入提交当前不在目标分支中");
  next.merge=pr.mergeCommit.oid;next.devMergedAt=pr.mergedAt;
- if(delivery.release===delivery.base)next.masterMergedAt=pr.mergedAt;
- else {
+ {
   try {
-   const release=JSON.parse(await command("gh",["api",`repos/${delivery.repo}/compare/${next.merge}...${delivery.release}`]));
-   if(["ahead","identical"].includes(release.status))next.masterMergedAt=new Date().toISOString();
+   const branchKey=delivery.repo.toLowerCase()+"#"+delivery.release;
+   if(!releaseHeads.has(branchKey))releaseHeads.set(branchKey,command("gh",["api",`repos/${delivery.repo}/commits/${delivery.release}`]).then(raw=>JSON.parse(raw).sha));
+   const commit=await releaseHeads.get(branchKey)!;
+   if(typeof commit!=="string"||!/^[a-f0-9]{40}$/.test(commit))throw Error("发布提交未确认");
+   if(delivery.merge===next.merge&&delivery.releaseProof?.commit===commit&&delivery.masterMergedAt){
+    next.masterMergedAt=delivery.masterMergedAt;next.releaseProof={...delivery.releaseProof,checkedAt:next.checkedAt!};return next;
+   }
+   const release=JSON.parse(await command("gh",["api",`repos/${delivery.repo}/compare/${next.merge}...${commit}`]));
+   if(!["ahead","behind","identical","diverged"].includes(release.status))throw Error("发布比较结果不完整");
+   const method=["ahead","identical"].includes(release.status)?"ancestry":release.status!=="behind"&&await containsReleasePatch(delivery.repo,next.merge!,commit)?"patch":null;
+   if(method){next.masterMergedAt=delivery.masterMergedAt??next.checkedAt;next.releaseProof={method,commit,checkedAt:next.checkedAt!};}
   } catch { next.error="发布分支暂时无法核对"; }
  }
  return next;

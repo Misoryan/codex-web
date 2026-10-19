@@ -24,6 +24,7 @@ const reportProperties = {
   deliveries: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false,
     required: ["repo", "pr", "base", "release"], properties: {
       repo: { type: "string", pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", maxLength: 200 },
+      issueNumbers: { type: "array", uniqueItems: true, minItems: 1, items: { type: "integer", minimum: 1 } },
       pr: { type: "integer", minimum: 1 }, base: { type: "string", enum: ["dev", "master", "main"] },
       release: { type: "string", enum: ["master", "main"] },
     } } },
@@ -75,6 +76,8 @@ export async function registerWorkflow(app: FastifyInstance) {
     refreshing = (async () => {
       await syncThreads();
       await inbox.refresh(includeImported);
+      await Promise.allSettled(store.list().filter(task => task.managed || task.workflowSource).map(task => refreshRemoteWorktrees(store, task.id)));
+      await lifecycle.refreshPublications(includeImported);
       const tasks = store.list().filter(task => !task.archivedAt && (task.managed || includeImported && task.issue));
       let index = 0;
       await Promise.all(Array.from({ length: 3 }, async () => {
@@ -170,6 +173,7 @@ export async function registerWorkflow(app: FastifyInstance) {
     if (!store.validToken(id, request.headers.authorization?.replace(/^Bearer /, "") ?? "")) return reply.code(403).send({ error: "工作流上报凭据无效" });
     if (lifecycle.isBusy(id)) return reply.code(409).send({ error: "正在核对交付与资源，请稍后上报" });
     const report = request.body as any;
+    if (report.deliveries?.some((delivery: any) => delivery.repo.toLowerCase().endsWith("/codefuncore") && delivery.base !== "dev")) return reply.code(400).send({ error: "CodeFunCore 新交付必须指向 dev" });
     if ((report.status === "completed" || report.stage === "done") && !report.summary?.trim()) return reply.code(400).send({ error: "完成时请填写结果摘要" });
     const previous = store.get(id)!;
     if (previous.archivedAt || previous.cleanup.state === "released" && (report.worktrees || report.remoteWorktrees || report.resources || report.deliveries)) return reply.code(409).send({ error: "资源已收尾，请在新事项中登记后续工作" });
@@ -209,7 +213,9 @@ export async function registerWorkflow(app: FastifyInstance) {
     }
     if (report.deliveries) report.deliveries = report.deliveries.map((d: any) => ({ ...d, url: `https://github.com/${d.repo}/pull/${d.pr}` }));
     if (report.resources) report.resources = report.resources.map((resource: any) => ({ ...resource, released: false }));
+    if (report.deliveries?.some((delivery: any) => delivery.issueNumbers?.some((number: number) => number !== (report.issue?.number ?? previous.issue?.number) && !previous.relatedIssues?.some(issue => issue.number === number)))) return reply.code(400).send({ error: "PR 只能关联本会话已登记的事项" });
     const updated = store.update(id, { ...report, managed: true }, "progress");
+    lifecycle.invalidatePublication();
     void lifecycle.reconcile(id).catch(error => app.log.error(error));
     return updated;
   });
