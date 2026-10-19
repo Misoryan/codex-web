@@ -376,6 +376,30 @@ scenario('HTTP 立即登记远端工作区，分支和 HEAD 由只读工具回�
   } finally { await f.close(); }
 });
 
+scenario('HTTP 接受真实待回收状态 eligible 和 eligible_resume，拒绝未知状态且保留登记', async () => {
+  let created;
+  const f=await fixture([], (store,cwd)=>{
+    created=store.create('remote-eligible',{title:'Remote cleanup',kind:'feature',prompt:'Requirement',cwd});
+  });
+  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/owned/repo'};
+  const report=()=>f.app.inject({method:'POST',url:prefix+'/'+created.task.id+'/report',headers:{authorization:'Bearer '+created.token},payload:{remoteWorktrees:[remote]}});
+  try {
+    for(const state of ['eligible','eligible_resume']) {
+      f.respondRemote({worktrees:[{...remote,branch:'feature/owned',head:'a'.repeat(40),cleanup:{state,reason:'Awaiting existing cleanup worker',checkedAt:null}}]});
+      const response=await report();
+      assert.equal(response.statusCode,200,response.body);
+      assert.equal(response.json().remoteWorktrees[0].cleanup.state,state);
+      assert.notEqual(response.json().cleanup.state,'released');
+    }
+    const before=f.store.get(created.task.id).remoteWorktrees;
+    f.respondRemote({worktrees:[{...remote,branch:'feature/owned',head:'a'.repeat(40),cleanup:{state:'unknown-cleanup-state',reason:'',checkedAt:null}}]});
+    const response=await report();
+    assert.equal(response.statusCode,503,response.body);
+    assert.match(response.json().error,/登记未确认/);
+    assert.deepEqual(f.store.get(created.task.id).remoteWorktrees,before);
+  } finally {await f.close();}
+});
+
 scenario('远端核对未完成时 GET 列表仍立即返回已登记数据，缺失与跨任务返回不覆盖记录', async () => {
   let created;
   const f = await fixture([], (store, cwd) => {

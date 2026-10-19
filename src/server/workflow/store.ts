@@ -8,8 +8,9 @@ export type Delivery = { repo: string; pr: number; url: string; base: string; re
 export type Worktree = { repo: string; path: string; branch: string; head: string;
   removalStartedAt?: string; removedAt?: string; releasedAt?: string };
 export type Resource = { kind: "bbdev-lease" | "bedrock-client"; task: string; lease: string; slot?: number; released: boolean };
+export const remoteCleanupStates = ["unregistered", "registered", "retained", "eligible", "eligible_resume", "cleaning", "cleanup_failed", "cleaned"] as const;
 export type RemoteWorktree = { host: "bbdev"; task: string; path: string; branch: string; head: string;
-  cleanup: { state: string; reason: string; checkedAt: string | null } };
+  cleanup: { state: typeof remoteCleanupStates[number]; reason: string; checkedAt: string | null } };
 export type Workflow = {
   id: string; title: string; kind: string; prompt: string; cwd: string;
   threadId: string | null; stage: string; status: string; summary: string;

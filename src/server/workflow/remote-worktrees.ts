@@ -1,6 +1,7 @@
 import { command } from "./git";
 import path from "node:path";
 import type { RemoteWorktree, Resource, WorkflowStore } from "./store";
+import { remoteCleanupStates } from "./store";
 
 export type RemoteRegistration = Pick<RemoteWorktree, "host" | "task" | "path">;
 const refreshing = new Set<string>();
@@ -16,7 +17,7 @@ export async function inspectRemoteWorktrees(worktrees: RemoteRegistration[], re
     if (worktree.host !== "bbdev" || typeof worktree.task !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(worktree.task) ||
         typeof worktree.path !== "string" || !path.posix.isAbsolute(worktree.path) || path.posix.normalize(worktree.path) !== worktree.path ||
         typeof worktree.branch !== "string" || typeof worktree.head !== "string" || !/^[a-f0-9]{40}$/.test(worktree.head) ||
-        !["unregistered", "registered", "retained", "cleaning", "cleanup_failed", "cleaned"].includes(worktree.cleanup?.state) || typeof worktree.cleanup?.reason !== "string" ||
+        !remoteCleanupStates.includes(worktree.cleanup?.state) || typeof worktree.cleanup?.reason !== "string" ||
         worktree.cleanup.checkedAt !== null && (typeof worktree.cleanup.checkedAt !== "string" || !Number.isFinite(Date.parse(worktree.cleanup.checkedAt)))) {
       throw Error("远端工作区核对结果不完整");
     }
