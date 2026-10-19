@@ -29,7 +29,20 @@ export async function createWorkflowThread(task: Workflow, prompt: string, onCre
       everydayWork: true, usesDesktopMcp: true, sidebarSectionToolsEnabled: false,
       readDynamicTools: async () => [],
     }),
-    afterConversationCreated: async (id: string) => { onCreated(id); },
+    afterConversationCreated: async (id: string) => {
+      onCreated(id);
+      const state = workflowHost().options.globalState;
+      state.update("sidebar-project-thread-orders", (value: any) => {
+        const orders = value ?? {};
+        return { ...orders,
+          [project.id]: { ...orders[project.id], threadIds: [id, ...(orders[project.id]?.threadIds ?? []).filter((threadId: string) => threadId !== id)] },
+        };
+      });
+      await state.flushOrThrow();
+      const context = workflowHost();
+      const thread = await context.getLocalAppServerClient().readThread(id, { includeTurns: false });
+      context.threadCatalogSyncManager?.getCoordinator("local")?.observeThread(thread);
+    },
   });
   if (result.conversationId) {
     onCreated(result.conversationId);

@@ -106,7 +106,6 @@ export class RuntimeReader {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id); reject(Error("Native runtime read timed out"));
-        this.disconnected(socket, Error("Native runtime read timed out"));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       socket.send(JSON.stringify({ type: "renderer-command", seq: ++this.sequence, payload: {

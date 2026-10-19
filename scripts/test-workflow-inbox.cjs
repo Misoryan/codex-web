@@ -98,6 +98,9 @@ async function fixture(items, seed = () => {}) {
   const starts = [], titles = [], metadata = [], rename = {mode: 'confirm'};
   const nativeThreads = new Map(store.list().filter(task => task.threadId).map(task =>
     [task.threadId, {id: task.threadId, name: task.title, cwd: task.cwd}]));
+  const stateFile = path.join(home, 'sidebar-state.json');
+  const sidebarState = {'sidebar-project-thread-orders': {'fixture-project': {threadIds: ['older-task']}, untouched: {threadIds: ['other-task']}}};
+  const catalog = [];
   const manager = {
     getConversation: () => undefined,
     async startConversation(input, options) {
@@ -130,7 +133,9 @@ async function fixture(items, seed = () => {}) {
   global.__codexWorkflowHost = {
     appServerManagersService: {}, hostAppServerManagers: {getCurrent: () => ({resource: {manager}})},
     getLocalAppServerClient: () => client,
-    options: {globalState: {get(key) {
+    threadCatalogSyncManager: {getCoordinator(host) {assert.equal(host, 'local'); return {observeThread(thread) {catalog.push(thread)}}}},
+    options: {globalState: {update(key, updater) {sidebarState[key] = updater(sidebarState[key]);},
+    async flushOrThrow() {fs.writeFileSync(stateFile, JSON.stringify(sidebarState));}, get(key) {
       assert.equal(key, 'local-projects');
       return {fixture: {id: 'fixture-project', rootPaths: [cwd]}};
     }}},
@@ -148,7 +153,7 @@ async function fixture(items, seed = () => {}) {
   const create = (number, patch = {}) => app.inject({method: 'POST', url: prefix, headers,
     payload: {requestKey: randomUUID(), title: 'Implement assigned item', kind: 'feature',
       prompt: 'Implement the existing requirement', ...(number === undefined ? {} : {issueNumber: number}), ...patch}});
-  return {app, store, cwd, data, starts, titles, respond, respondRemote, create, metadata, nativeThreads, rename,
+  return {app, store, cwd, data, starts, titles, respond, respondRemote, create, metadata, nativeThreads, rename, stateFile, catalog,
     async close() { await app.close(); store.close(); }};
 }
 
@@ -207,6 +212,10 @@ scenario('同一事项的并发发起和重试只创建一个原生会话，保�
     const started = f.starts[0].input;
     assert.equal(started.cwd, f.cwd); assert.deepEqual(started.workspaceRoots, [f.cwd]);
     assert.deepEqual(started.projectAssignment, {projectKind: 'local', projectId: 'fixture-project'});
+    const savedSidebar = JSON.parse(fs.readFileSync(f.stateFile, 'utf8'));
+    assert.deepEqual(savedSidebar['sidebar-project-thread-orders']['fixture-project'].threadIds, [task.threadId, 'older-task']);
+    assert.deepEqual(savedSidebar['sidebar-project-thread-orders'].untouched.threadIds, ['other-task']);
+    assert.deepEqual(f.catalog.map(thread => thread.id), [task.threadId]);
     const prompt = started.input[0].text;
     assert(prompt.includes(assigned.url)); assert(prompt.includes('#701'));
     assert.match(prompt, /读取原事项需求并复用该事项/); assert.match(prompt, /\$easecation-workflow/);

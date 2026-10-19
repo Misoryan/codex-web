@@ -18,6 +18,7 @@ export type Workflow = {
   threadId: string | null; stage: string; status: string; summary: string;
   evidence: { label: string; value: string; url?: string }[];
   plan: { step: string; status: string }[]; runtime: string; activeFlags?: string[]; runtimeCheckedAt?: string;
+  runtimeLastKnown?: { runtime: string; activeFlags: string[]; pending: number; checkedAt: string };
   lastMessage: string; pending: number; error: string | null;
   createdAt: string; updatedAt: string;
   issue: { number: number; url: string; title?: string; status?: string; ancestors?: { number: number; title: string; url: string }[] } | null; project: string;

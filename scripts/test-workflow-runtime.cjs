@@ -23,7 +23,7 @@ const {workflowSnapshots, closeRuntimeObservers} = load('host');
 async function bridge() {
   const server = new WebSocketServer({host:'127.0.0.1',port:0});
   await new Promise(resolve => server.on('listening', resolve));
-  const fixture = {server, loaded:new Map(), calls:[], peers:new Set(), silent:false, closedReasons:[]};
+  const fixture = {server, loaded:new Map(), calls:[], peers:new Set(), silent:false, delays:new Map(), closedReasons:[]};
   fixture.url = `ws://127.0.0.1:${server.address().port}/__backend/ipc`;
   server.on('connection',(socket,request)=>{
     fixture.peers.add(socket);
@@ -45,7 +45,8 @@ async function bridge() {
       let result;
       if(method==='thread/loaded/list')result={data:[...fixture.loaded.keys()],nextCursor:null};
       else {assert.equal(params.includeTurns,false); assert(fixture.loaded.has(params.threadId),'Only loaded relevant threads may be read');result={thread:{id:params.threadId,status:fixture.loaded.get(params.threadId)}}}
-      socket.send(JSON.stringify({type:'renderer-event',seq:++seq,payload:{type:'ipc-main-event',channel:'codex_desktop:message-for-view',args:[{type:'mcp-response',hostId:'local',message:{id,result}}]}}));
+      const reply=()=>{if(socket.readyState===1)socket.send(JSON.stringify({type:'renderer-event',seq:++seq,payload:{type:'ipc-main-event',channel:'codex_desktop:message-for-view',args:[{type:'mcp-response',hostId:'local',message:{id,result}}]}}))};
+      if(fixture.delays.has(params.threadId))setTimeout(reply,fixture.delays.get(params.threadId));else reply();
     });
   });
   fixture.close=async()=>{for(const socket of fixture.peers)socket.terminate();await new Promise(resolve=>server.close(resolve))};
@@ -92,6 +93,19 @@ async function bridge() {
     try{silent.loaded.set(active,{type:'active',activeFlags:[]});assert.equal((await reader.snapshot([active])).states.get(active).runtime,'active');silent.silent=true;const failed=await reader.snapshot([active]);assert.equal(failed.available,false);assert.equal(failed.states.has(active),false)}
     finally{reader.close();await silent.close()}
     console.log('PASS: Response timeout clears previous active observations');
+    const delayed=await bridge(), concurrentReader=new RuntimeReader(delayed.url,150);
+    try{
+      delayed.loaded.set(active,{type:'active',activeFlags:[]});delayed.loaded.set(wait,{type:'active',activeFlags:['waitingOnApproval']});
+      delayed.delays.set(active,180);delayed.delays.set(wait,100);
+      const slow=concurrentReader.snapshot([active]);
+      await new Promise(resolve=>setTimeout(resolve,80));
+      const waiting=concurrentReader.snapshot([wait]);
+      const [slowResult,waitingResult]=await Promise.all([slow,waiting]);
+      assert.equal(slowResult.states.get(active).runtime,'unknown');
+      assert.equal(waitingResult.states.get(wait).runtime,'active');assert.equal(waitingResult.states.get(wait).pending,1);
+      assert.equal(delayed.peers.size,1,'A slow thread must not disconnect the observer and cancel other reads');
+    }finally{concurrentReader.close();await delayed.close()}
+    console.log('PASS: One slow thread does not cancel concurrent status reads or reconnect the renderer');
     assert.throws(()=>new RuntimeReader('ws://example.com/__backend/ipc'),/loopback/);
     assert.throws(()=>new RuntimeReader('wss://127.0.0.1/__backend/ipc'),/loopback/);
     console.log('PASS: Observer endpoints are restricted to loopback WebSockets');

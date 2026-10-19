@@ -63,6 +63,7 @@ export async function registerWorkflow(app: FastifyInstance) {
   await fs.writeFile(path.join(directory, "service.json"), JSON.stringify({ endpoint, agentToken }), { mode: 0o600 });
   const allowedOrigins = new Set((process.env.CODEX_WORKFLOW_ORIGINS ?? "").split(",").filter(Boolean));
   let polling = false;
+  let checkingWorktrees: Promise<unknown> | undefined;
   let notificationConnection: any, unsubscribe: (() => void) | undefined;
   let refreshing: Promise<void> | undefined;
   let indexing: Promise<void> | undefined;
@@ -243,19 +244,25 @@ export async function registerWorkflow(app: FastifyInstance) {
       const tasks = store.list().filter(task => task.threadId && !task.archivedAt);
       try {
         const snapshots = await workflowSnapshots(tasks.map(task => task.threadId!));
-        for (const task of tasks) store.update(task.id, { ...snapshots.get(task.threadId!)!, updatedAt: store.get(task.id)!.updatedAt });
+        for (const task of tasks) {
+          const snapshot = snapshots.get(task.threadId!)!;
+          store.update(task.id, { ...snapshot,
+            ...(snapshot.runtime !== "unknown" ? { runtimeLastKnown: { runtime: snapshot.runtime, activeFlags: snapshot.activeFlags, pending: snapshot.pending, checkedAt: snapshot.runtimeCheckedAt } } : {}),
+            updatedAt: store.get(task.id)!.updatedAt });
+        }
       } catch {
         for (const task of tasks) store.update(task.id, { runtime: "unknown", activeFlags: [], pending: 0, runtimeCheckedAt: new Date().toISOString(), updatedAt: store.get(task.id)!.updatedAt });
       }
       if (++ticks % 15 === 0) {
         refreshAll();
-      } else if (ticks % 3 === 0) {
-        await Promise.allSettled(tasks.map(task => refreshRemoteWorktrees(store, task.id)));
+      } else if (ticks % 3 === 0 && !checkingWorktrees) {
+        checkingWorktrees = Promise.allSettled(tasks.map(task => refreshRemoteWorktrees(store, task.id)))
+          .finally(() => { checkingWorktrees = undefined; });
       }
     } finally { polling = false; }
   }, 10000);
   await syncThreads();
   timer.unref();
   refreshAll(true);
-  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await indexing; await lifecycle.drain(); closeRuntimeObservers(); store.close(); });
+  app.addHook("onClose", async () => { clearInterval(timer); unsubscribe?.(); await refreshing; await checkingWorktrees; await indexing; await lifecycle.drain(); closeRuntimeObservers(); store.close(); });
 }
