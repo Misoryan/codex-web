@@ -6,11 +6,11 @@ import { remoteCleanupStates } from "./store";
 export type RemoteRegistration = Pick<RemoteWorktree, "host" | "task" | "path">;
 const refreshing = new Set<string>();
 const snapshot = (task: ReturnType<WorkflowStore["get"]>) => JSON.stringify([task?.remoteWorktrees, task?.resources, task?.remoteWorktreesSync]);
-export async function inspectRemoteWorktrees(worktrees: RemoteRegistration[], resources: Resource[]) {
+export async function inspectRemoteWorktrees(worktrees: RemoteRegistration[], resources: Resource[], cleanup = false) {
   const helper = process.env.CODEX_WORKFLOW_REMOTE_WORKTREES_HELPER;
   if (!helper) throw Error("远端工作区核对服务未配置");
   const result = JSON.parse(await command(process.env.CODEX_WORKFLOW_PYTHON ?? "python",
-    ["-X", "utf8", helper, "--request", JSON.stringify({ worktrees,
+    ["-X", "utf8", helper, "--request", JSON.stringify({ worktrees, ...(cleanup ? { cleanup: true } : {}),
       resources: resources.filter(resource => resource.kind === "bbdev-lease") })]));
   if (!Array.isArray(result.worktrees)) throw Error("远端工作区核对结果不完整");
   for (const worktree of result.worktrees) {
@@ -30,12 +30,19 @@ export async function inspectRemoteWorktrees(worktrees: RemoteRegistration[], re
   return result.worktrees as RemoteWorktree[];
 }
 
-export async function refreshRemoteWorktrees(store: WorkflowStore, id: string) {
+export async function cleanRemoteWorktrees(store: WorkflowStore, id: string) {
+  const task = store.get(id)!;
+  if (!task.remoteWorktrees?.some(worktree => worktree.cleanup.state !== "cleaned")) return;
+  const remoteWorktrees = await inspectRemoteWorktrees(task.remoteWorktrees, task.resources, true);
+  store.update(id, { remoteWorktrees, remoteWorktreesSync: { checkedAt: new Date().toISOString(), error: null } }, "remote-worktrees.checked");
+}
+
+export async function refreshRemoteWorktrees(store: WorkflowStore, id: string, force = false) {
   const task = store.get(id);
   if (!task) return;
-  if (refreshing.has(id)) return;
+  if (refreshing.has(id)) { if (force) throw Error("远端工作区正在核对，请稍后重试"); return; }
   if (!task.remoteWorktrees?.length && !task.resources.some(resource => resource.kind === "bbdev-lease")) return;
-  if (task.remoteWorktreesSync && Date.now() - Date.parse(task.remoteWorktreesSync.checkedAt) < 30000) return;
+  if (!force && task.remoteWorktreesSync && Date.now() - Date.parse(task.remoteWorktreesSync.checkedAt) < 30000) return;
   const checkedAt = new Date().toISOString();
   const before = snapshot(task);
   refreshing.add(id);

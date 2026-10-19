@@ -652,6 +652,77 @@ scenario('HTTP 核对 GitHub 期间拒绝并发覆盖登记，完成核对后保
   } finally { finishGithub?.(); await app.close(); }
 });
 
+scenario('手动归档清理已合入 dev 的导入事项，移除独立工作区且不改业务状态', async () => {
+  const fixture = worktreeFixture(), store = storeFixture(), threadId = threadFixture(fixture.target, 'notLoaded');
+  conversations.delete(threadId);
+  const {task} = makeTask(store, {managed:false, imported:true, threadId, cwd:fixture.target,
+    mobius:{status:'READY_FOR_RELEASE',desired:null,checkedAt:null,error:null},
+    worktrees:[fixture.worktree], deliveries:[deliveryFixture(1,'MERGED',false,fixture.head)]});
+  const lifecycle = new WorkflowLifecycle(store, scenarioRoot);
+  const result = await lifecycle.archiveAndClean(task.id);
+  assert(result.archivedAt); assert.equal(result.cleanup.state,'released');
+  assert(!fs.existsSync(fixture.target)); assert(fs.existsSync(fixture.repo));
+  assert.equal(fs.readFileSync(path.join(fixture.sibling,'personal.txt'),'utf8'),'preserve sibling data\n');
+  assert.equal(git(fixture.repo,'for-each-ref','--format=%(refname)','refs/heads/feature-fixture'),'');
+  assert.equal(result.managed,false); assert.equal(result.mobius.status,'READY_FOR_RELEASE');
+  assert.equal(result.stage,task.stage); assert.equal(result.status,task.status);
+  assert.equal(helperCalls().length,0,'Manual archive must not change Mobius');
+  await lifecycle.archiveAndClean(task.id); assert.equal(archived.length,1);
+});
+
+for (const condition of ['unmerged','dirty','ignored','active','waiting','unknown']) scenario('手动归档清理保留工作区：'+condition, async () => {
+  const fixture=worktreeFixture(), store=storeFixture();
+  const runtime=condition==='active'||condition==='waiting'?'active':condition==='unknown'?'unknown':'idle';
+  const threadId=threadFixture(fixture.target,runtime,condition==='waiting'?1:0);
+  if(condition==='dirty')fs.appendFileSync(path.join(fixture.target,'tracked.txt'),'uncommitted\n');
+  if(condition==='ignored')fs.writeFileSync(path.join(fixture.target,'ignored.log'),'personal evidence');
+  const {task}=makeTask(store,{managed:false,threadId,cwd:fixture.target,worktrees:[fixture.worktree],
+    deliveries:[deliveryFixture(1,condition==='unmerged'?'OPEN':'MERGED',false,fixture.head)]});
+  const reason=condition==='unmerged'?/尚未全部合入/:condition==='dirty'||condition==='ignored'?/未提交、未跟踪或被忽略/:/运行或等待回应|状态尚未确认/;
+  await assert.rejects(new WorkflowLifecycle(store,scenarioRoot).archiveAndClean(task.id),reason);
+  assert(fs.existsSync(fixture.target)); assert.equal(git(fixture.repo,'rev-parse','feature-fixture'),fixture.head);
+  assert.equal(store.get(task.id).archivedAt,null); assert.equal(archived.length,0);
+});
+
+scenario('手动归档接口核对来源并回读归档结果，失败可重试而不标记业务完成', async () => {
+  const app=require('fastify')(); await app.register(registerWorkflow); await app.ready();
+  const store=new WorkflowStore(process.env.CODEX_WORKFLOW_DATA); stores.add(store);
+  const threadId=threadFixture(scenarioRoot,'notLoaded');
+  const {task}=makeTask(store,{managed:false,threadId,deliveries:[deliveryFixture(1,'OPEN')]});
+  const service=JSON.parse(fs.readFileSync(path.join(process.env.CODEX_WORKFLOW_DATA,'service.json'),'utf8'));
+  const url=prefix+'/'+task.id+'/archive', headers={authorization:'Bearer '+service.agentToken};
+  try {
+    assert.equal((await app.inject({method:'POST',url,headers:{origin:'https://attacker.invalid'}})).statusCode,403);
+    archiveMode='unconfirmed';
+    const failed=await app.inject({method:'POST',url,headers});
+    assert.equal(failed.statusCode,409); assert.match(failed.json().error,/归档结果尚未确认/);
+    assert.equal(store.get(task.id).archivedAt,null);
+    archiveMode='confirm';
+    const result=await app.inject({method:'POST',url,headers});
+    assert.equal(result.statusCode,200); assert(result.json().archivedAt);
+    assert.equal(result.json().status,task.status); assert.equal(result.json().managed,false);
+    assert.equal(helperCalls().length,0);
+    assert.equal((await app.inject({method:'POST',url:prefix+'/'+randomUUID()+'/archive',headers})).statusCode,404);
+  } finally {await app.close();}
+});
+
+scenario('手动归档等待远端回收确认，失败不归档并支持重新核对', async () => {
+  const store=storeFixture(),threadId=threadFixture(scenarioRoot,'notLoaded');
+  const remote={host:'bbdev',task:'fixture-owned',path:'/workspace/worktrees/fixture-owned/repo',branch:'feature/task',head:'b'.repeat(40),cleanup:{state:'retained',reason:'lease active',checkedAt:null}};
+  const {task}=makeTask(store,{managed:false,threadId,remoteWorktrees:[remote]});
+  const lifecycle=new WorkflowLifecycle(store,scenarioRoot);
+  process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[remote]});
+  await assert.rejects(lifecycle.archiveAndClean(task.id),/远端工作区等待/);
+  assert.equal(store.get(task.id).archivedAt,null);assert.equal(archived.length,0);
+  process.env.WORKFLOW_FIXTURE_REMOTE_RESULT='fail';
+  await assert.rejects(lifecycle.archiveAndClean(task.id));
+  assert.equal(store.get(task.id).archivedAt,null);assert.equal(archived.length,0);
+  process.env.WORKFLOW_FIXTURE_REMOTE_RESULT=JSON.stringify({worktrees:[{...remote,cleanup:{state:'cleaned',reason:'',checkedAt:null}}]});
+  const result=await lifecycle.archiveAndClean(task.id);
+  assert(result.archivedAt);assert.equal(result.cleanup.state,'released');assert.equal(result.managed,false);
+  assert.equal(archived.length,1);assert.equal(result.stage,task.stage);
+});
+
 async function waitForReconciliation(id, after) {
   const deadline=Date.now()+45000;
   let observed;

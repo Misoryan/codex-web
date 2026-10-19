@@ -3,7 +3,7 @@ import { command, inspectDelivery, removeWorktree } from "./git";
 import { within } from "./indexer";
 import { workflowHost, workflowManager, workflowSnapshot } from "./host";
 import type { Workflow, WorkflowStore } from "./store";
-import { refreshRemoteWorktrees } from "./remote-worktrees";
+import { refreshRemoteWorktrees, cleanRemoteWorktrees } from "./remote-worktrees";
 
 export function desiredIssueStatus(task: Workflow) {
   if (task.deliveries.some(delivery => delivery.error)) return null;
@@ -27,12 +27,12 @@ export class WorkflowLifecycle {
   isBusy(id: string) { return this.locks.has(id); }
   async drain() { await Promise.allSettled([...this.pending]); }
 
-  async assertIdle(task: Workflow, target?: string) {
+  async assertIdle(task: Workflow, target?: string, allowUnloaded = false) {
     const tasks = this.store.list().filter(other => other.threadId && !other.archivedAt &&
       (other.id === task.id || target && (within(target, other.cwd) || other.worktrees.some(w => w.path === target))));
     for (const other of tasks) {
       const state = await workflowSnapshot(other.threadId!);
-      if (state.pending || !["idle", "completed", "interrupted", "failed"].includes(state.runtime)) throw Error("对应会话仍在运行或等待回应");
+      if (state.pending || !["idle", "completed", "interrupted", "failed", ...(allowUnloaded ? ["notLoaded"] : [])].includes(state.runtime)) throw Error("对应会话仍在运行或等待回应，或状态尚未确认");
     }
     if (target) {
       const client = workflowHost().getLocalAppServerClient();
@@ -42,7 +42,7 @@ export class WorkflowLifecycle {
         for (const thread of page.data) {
           if (!within(target, thread.cwd)) continue;
           const state = await workflowSnapshot(thread.id);
-          if (state.pending || !["idle", "completed", "interrupted", "failed"].includes(state.runtime)) throw Error("工作区中还有运行中的会话");
+          if (state.pending || !["idle", "completed", "interrupted", "failed", ...(allowUnloaded ? ["notLoaded"] : [])].includes(state.runtime)) throw Error("工作区中还有运行中的会话，或状态尚未确认");
         }
         cursor = page.nextCursor ?? null;
       } while (cursor);
@@ -66,12 +66,14 @@ export class WorkflowLifecycle {
     }
   }
 
-  private async release(task: Workflow) {
-    if (!task.managed || !task.deliveries.length || !task.deliveries.every(d => d.devMergedAt)) return;
+  private async release(task: Workflow, manual = false) {
+    if (!manual && (!task.managed || !task.deliveries.length || !task.deliveries.every(d => d.devMergedAt))) return;
     if (task.cleanup.state === "released") return;
     this.store.update(task.id, { cleanup: { state: "pending", reason: "等待会话空闲后释放", checkedAt: new Date().toISOString() } });
     try {
-      await this.assertIdle(task);
+      await this.assertIdle(task, undefined, manual);
+      if (manual && task.worktrees.some(worktree => !worktree.releasedAt) &&
+          (!task.deliveries.length || task.deliveries.some(delivery => !delivery.devMergedAt))) throw Error("任务工作区的交付尚未全部合入，请先合入后再清理");
       const resourceOrder = task.resources.map((resource, index) => ({ resource, index }))
         .sort((a, b) => Number(a.resource.kind === "bbdev-lease") - Number(b.resource.kind === "bbdev-lease"));
       for (const { index } of resourceOrder) {
@@ -89,11 +91,11 @@ export class WorkflowLifecycle {
       for (let index = 0; index < task.worktrees.length; index++) {
         const worktree = this.store.get(task.id)!.worktrees[index]!;
         if (worktree.releasedAt) continue;
-        await this.assertIdle(this.store.get(task.id)!, worktree.path);
+        await this.assertIdle(this.store.get(task.id)!, worktree.path, manual);
         await removeWorktree(worktree, this.cwd, task.deliveries, value => {
           const worktrees = [...this.store.get(task.id)!.worktrees]; worktrees[index] = value;
           this.store.update(task.id, { worktrees }, value.releasedAt ? "worktree.released" : undefined);
-        }, () => this.assertIdle(this.store.get(task.id)!, worktree.path));
+        }, () => this.assertIdle(this.store.get(task.id)!, worktree.path, manual));
       }
       const projects = workflowHost().projectsManager;
       if (!projects) throw Error("原生项目管理器尚未就绪");
@@ -104,10 +106,14 @@ export class WorkflowLifecycle {
         if (!task.worktrees.some(w => path.resolve(w.path).toLowerCase() === root.toLowerCase())) continue;
         const other = this.store.list().find(t => t.id !== task.id && !t.archivedAt && within(root, t.cwd));
         if (other) throw Error("临时项目仍被其他事项使用");
-        await this.assertIdle(this.store.get(task.id)!, root);
+        await this.assertIdle(this.store.get(task.id)!, root, manual);
         await projects.removeLocal(project.id);
         if (projects.getLocalProjects()[project.id]) throw Error("临时项目入口仍存在");
         this.store.update(task.id, { projectsRemoved: [...this.store.get(task.id)!.projectsRemoved, project.id] });
+      }
+      if (manual) {
+        await this.assertIdle(this.store.get(task.id)!, undefined, true);
+        await cleanRemoteWorktrees(this.store, task.id);
       }
       const current = this.store.get(task.id)!;
       if (current.remoteWorktreesSync?.error || current.remoteWorktrees?.some(worktree => worktree.cleanup.state !== "cleaned")) {
@@ -118,6 +124,53 @@ export class WorkflowLifecycle {
     } catch (error) {
       this.store.update(task.id, { cleanup: { state: "blocked", reason: (error as Error).message, checkedAt: new Date().toISOString() } }, "cleanup.blocked");
     }
+  }
+
+  archiveAndClean(id: string) {
+    const operation = this.runArchiveAndClean(id).finally(() => this.pending.delete(operation));
+    this.pending.add(operation);
+    return operation;
+  }
+
+  private async archiveConversation(task: Workflow, manual = false) {
+    if (!task.threadId) throw Error("事项尚未关联会话");
+    await this.assertIdle(task, undefined, manual);
+    await workflowManager().archiveConversation(task.threadId, { useAppServerPins: true, source: "archive_directive" });
+    const observed = await workflowHost().getLocalAppServerClient().readThread(task.threadId, { includeTurns: false });
+    if (observed.archivedAt == null && observed.archived !== true) {
+      const page = await workflowHost().getLocalAppServerClient().listThreads({ limit: 100, cursor: null, archived: true, useStateDbOnly: true });
+      if (!page.data.some((thread: any) => thread.id === task.threadId)) throw Error("会话归档结果尚未确认");
+    }
+    return this.store.update(task.id, { archivedAt: new Date().toISOString(), error: null }, "conversation.archived");
+  }
+
+  private async runArchiveAndClean(id: string) {
+    if (this.locks.has(id)) throw Error("正在核对该事项，请稍后重试");
+    this.locks.add(id);
+    try {
+      let task = this.store.get(id)!;
+      if (task.archivedAt) return task;
+      if (!task.threadId) throw Error("事项尚未关联会话");
+      await this.assertIdle(task, undefined, true);
+      await refreshRemoteWorktrees(this.store, id, true);
+      task = this.store.get(id)!;
+      if (task.worktrees.some(worktree => !worktree.releasedAt)) {
+        const deliveries = [];
+        for (const delivery of task.deliveries) deliveries.push(await inspectDelivery(delivery));
+        task = this.store.update(id, { deliveries }, "delivery.checked");
+      }
+      await this.release(task, true);
+      task = this.store.get(id)!;
+      if (task.cleanup.state !== "released" || task.worktrees.some(worktree => !worktree.releasedAt) ||
+          task.resources.some(resource => !resource.released) || task.remoteWorktreesSync?.error ||
+          task.remoteWorktrees?.some(worktree => worktree.cleanup.state !== "cleaned")) {
+        throw Error(task.cleanup.reason || "工作区尚未清理完成，保留会话");
+      }
+      return await this.archiveConversation(task, true);
+    } catch (error) {
+      this.store.update(id, { error: (error as Error).message });
+      throw error;
+    } finally { this.locks.delete(id); }
   }
 
   reconcile(id: string, archive = true) {
@@ -150,14 +203,7 @@ export class WorkflowLifecycle {
           !task.remoteWorktreesSync?.error && (!task.remoteWorktrees?.length || task.remoteWorktrees.every(worktree => worktree.cleanup.state === "cleaned")) &&
           (!task.worktrees.length && !task.resources.length || task.cleanup.state === "released") && task.threadId) {
         try {
-          await this.assertIdle(task);
-          await workflowManager().archiveConversation(task.threadId, { useAppServerPins: true, source: "archive_directive" });
-          const observed = await workflowHost().getLocalAppServerClient().readThread(task.threadId, { includeTurns: false });
-          if (observed.archivedAt == null && observed.archived !== true) {
-            const page = await workflowHost().getLocalAppServerClient().listThreads({ limit: 100, cursor: null, archived: true, useStateDbOnly: true });
-            if (!page.data.some((thread: any) => thread.id === task.threadId)) throw Error("会话归档结果尚未确认");
-          }
-          this.store.update(id, { archivedAt: new Date().toISOString(), error: null }, "conversation.archived");
+          await this.archiveConversation(task);
         } catch (error) { this.store.update(id, { error: (error as Error).message }); }
       }
       return this.store.get(id);

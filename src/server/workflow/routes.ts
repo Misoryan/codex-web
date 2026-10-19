@@ -216,11 +216,16 @@ export async function registerWorkflow(app: FastifyInstance) {
     refreshAll(true);
     return reply.code(202).send({ syncing: true });
   });
-  for (const action of ["release", "archive"]) app.post<{ Params: { id: string } }>(prefix + "/:id/" + action,
+  app.post<{ Params: { id: string } }>(prefix + "/:id/release",
     { preHandler: sameOrigin }, async (request, reply) => {
       if (!store.get(request.params.id)) return reply.code(404).send({ error: "工作流不存在" });
       return lifecycle.reconcile(request.params.id);
     });
+  app.post<{ Params: { id: string } }>(prefix + "/:id/archive", { preHandler: sameOrigin }, async (request, reply) => {
+    if (!store.get(request.params.id)) return reply.code(404).send({ error: "工作流不存在" });
+    try { return await lifecycle.archiveAndClean(request.params.id); }
+    catch (error) { return reply.code(409).send({ error: (error as Error).message }); }
+  });
   let ticks = 0;
   const timer = setInterval(async () => {
     if (polling) return;
