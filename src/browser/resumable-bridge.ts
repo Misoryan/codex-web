@@ -25,6 +25,7 @@ export class ResumableBridge {
   private ping = 0;
   private waitingPing: number | null = null;
   private document = documentId();
+  private suspendedSocket: WebSocket | null = null;
 
   constructor(
     private session: string,
@@ -35,20 +36,26 @@ export class ResumableBridge {
   ) {
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
-        this.connect();
+        // Resume the document over a fresh transport instead of waiting for a
+        // mobile socket that still says OPEN to discover its lost connection.
+        if (this.suspendedSocket && this.socket === this.suspendedSocket) this.reconnect("Foreground return");
+        else this.connect();
+        this.suspendedSocket = null;
         this.probe();
       } else {
+        this.suspendedSocket = this.socket;
         this.clearWatchdog();
         this.waitingPing = null;
       }
     });
     window.addEventListener("online", () => {
-      this.connect();
+      this.reconnect("Network online");
       this.probe();
     });
     window.addEventListener("offline", () => this.socket?.close(1000, "Network offline"));
     // A bfcache return keeps the document and its native IPC ports alive.
     window.addEventListener("pagehide", (event) => {
+      this.suspendedSocket = this.socket;
       if (!event.persisted) {
         this.stopped = true;
         clearInterval(this.heartbeat);
@@ -57,8 +64,10 @@ export class ResumableBridge {
       }
       this.socket?.close(1000, event.persisted ? "Page suspended" : "Document closed");
     });
-    window.addEventListener("pageshow", () => {
-      this.connect();
+    window.addEventListener("pageshow", (event) => {
+      if (event.persisted && this.socket === this.suspendedSocket) this.reconnect("Foreground return");
+      else this.connect();
+      this.suspendedSocket = null;
       this.probe();
     });
     this.heartbeat = setInterval(() => {
@@ -67,6 +76,21 @@ export class ResumableBridge {
         this.probe();
       }
     }, 10_000);
+    this.connect();
+  }
+
+  private reconnect(reason: string) {
+    if (this.stopped || document.hidden || !navigator.onLine) return;
+    const socket = this.socket;
+    // A visibilitychange and online event can describe the same return.
+    if (reason === "Network online" && socket?.readyState === WebSocket.CONNECTING) return;
+    this.socket = null;
+    this.connected = false;
+    this.waitingPing = null;
+    this.clearWatchdog();
+    clearTimeout(this.retryTimer);
+    this.retry = 0;
+    socket?.close(1000, reason);
     this.connect();
   }
 
@@ -179,9 +203,12 @@ export class ResumableBridge {
     });
     if (this.epoch) params.set("epoch", this.epoch);
     const socket = new WebSocket(
-      `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/__backend/ipc?${params}${this.query}`,
+      `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/__backend/native/ipc?${params}${this.query}`,
     );
     this.socket = socket;
+    const started = performance.now();
+    const resumed = this.epoch !== null;
+    let replayEvents = 0, replayBytes = 0;
     this.armWatchdog(socket, "Handshake timeout");
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket || this.stopped) return;
@@ -214,6 +241,7 @@ export class ResumableBridge {
           if (frame.seq <= this.ack) return;
           if (frame.seq !== this.ack + 1) throw Error("Missing event");
           this.receive(frame.payload);
+          if (!this.connected) { replayEvents++; replayBytes += new TextEncoder().encode(String(event.data)).byteLength; }
           this.ack = frame.seq;
           socket.send(JSON.stringify({ type: "renderer-ack", seq: this.ack }));
           return;
@@ -225,6 +253,12 @@ export class ResumableBridge {
           this.retry = 0;
           this.connected = true;
           this.status("ready");
+          const detail = { resumed, durationMs: Math.round(performance.now() - started), replayEvents, replayBytes };
+          window.dispatchEvent(new CustomEvent("codex-recovery", { detail: { event: "caught_up", ...detail } }));
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (this.socket === socket && this.connected && !document.hidden)
+              window.dispatchEvent(new CustomEvent("codex-recovery", { detail: { event: "recovery_paint", ...detail, durationMs: Math.round(performance.now() - started) } }));
+          }));
           this.flush();
           this.probe();
           return;

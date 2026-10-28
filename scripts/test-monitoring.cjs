@@ -15,7 +15,7 @@ const logs = path.join(candidate, 'logs-' + Date.now());
 const secret = 'monitor-secret-message-file-token';
 
 function connect(origin, params, options) {
-  const socket = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/ipc?' + new URLSearchParams(params), options);
+  const socket = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/native/ipc?' + new URLSearchParams(params), options);
   const frames = [];
   socket.on('message', raw => { frames.push(JSON.parse(String(raw))); socket.emit('frame'); });
   socket.on('error', () => {});
@@ -54,10 +54,15 @@ async function main() {
     const visit = randomUUID();
     assert.equal((await fetch(origin + '/__backend/telemetry', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({event: 'ready', visit, durationMs: 123, mode: 'lite', standalone: true, message: secret})})).status, 204);
     assert.equal((await fetch(origin + '/__backend/telemetry', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({event: secret, visit})})).status, 400);
+    for(const event of ['navigation','resources_ready','first_message','caught_up','recovery_paint','network_change']) {
+      assert.equal((await fetch(origin+'/__backend/telemetry',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({event,visit,resumed:true,replayBytes:1234,replayEvents:12,foregroundMs:321,networkType:'cellular',effectiveType:'4g',rttMs:150,downlinkKbps:1800,assetCount:2,assetsComplete:2,assetTransferBytes:456,assetsEndMs:789,message:secret})})).status,204);
+    }
+    assert.equal((await fetch(origin+'/__backend/telemetry',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({event:'network_change',visit,networkType:secret})})).status,400);
     const params = id();
     const first = open(params);
     const ready = await first.wait('renderer-ready');
     await first.wait('renderer-caught-up');
+    state.sendToRenderer(1,{type:'ipc-main-event',channel:secret,args:[{type:'fetch-response',body:secret}]});
     first.socket.send(JSON.stringify({type: 'renderer-ping', id: 42}));
     assert.equal((await first.wait('renderer-pong')).id, 42);
     first.socket.send(JSON.stringify({type: 'renderer-command', seq: 1, payload: {type: 'ipc-renderer-send', channel: secret, args: [secret]}}));
@@ -89,7 +94,7 @@ async function main() {
     owner.isDestroyed = () => false;
     owner.on('will-attach-webview', (_event, preferences) => { preferences.session = {}; });
     const guest = await handlers.get('codex-web:attach-browser')({sender: owner}, {partition: 'monitor-fixture', 'data-browser-sidebar-browser-tab-id': 'fixture', 'data-browser-sidebar-conversation-id': 'fixture'});
-    const stream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/browser-stream?token=' + guest.token);
+    const stream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/native/browser-stream?token=' + guest.token);
     sockets.push(stream);
     await once(stream, 'message');
     stream.send(JSON.stringify({type: 'view', visible: true, width: 320, height: 240}));
@@ -98,7 +103,7 @@ async function main() {
     stream.close(1000, 'Document closed');
     await once(stream, 'close');
     handlers.get('codex-web:close-browser')({sender: owner}, guest.token);
-    const rejectedStream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/browser-stream?token=' + secret);
+    const rejectedStream = new WebSocket(origin.replace('http:', 'ws:') + '/__backend/native/browser-stream?token=' + secret);
     rejectedStream.on('error', () => {});
     await new Promise(resolve => rejectedStream.once('close', resolve));
 
@@ -121,6 +126,8 @@ async function main() {
   assert(records.some(record => record.event === 'ipc.close' && record.code === 1000 && record.reason === 'Document closed'));
   assert(records.some(record => record.event === 'http.complete' && record.status === 404));
   assert(records.some(record => record.event === 'client.ready' && record.durationMs === 123 && record.standalone === true));
+  assert(records.some(r=>r.event==='client.recovery_paint'&&r.replayBytes===1234&&r.foregroundMs===321&&r.networkType==='cellular'));
+  assert(records.some(r=>r.event==='session.buffer_profile'&&r.category==='fetch-response'&&r.events===1&&r.bytes>0));
   const artifacts = Object.fromEntries(['main', 'browser-stream', 'renderer-sessions', 'observability'].map(name => {const file = `src/server/${name}.js`;return [file, require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(candidate, file))).digest('hex')];}));
   const report = {passed: true, artifacts, logDirectory: logs, events: [...new Set(events)].filter(Boolean), records: records.length, reconnectPreserved: true, secretsExcluded: true, realBrowserStream: true, heartbeatTimeout: true};
   fs.writeFileSync(path.join(candidate, 'acceptance.json'), JSON.stringify(report, null, 2));

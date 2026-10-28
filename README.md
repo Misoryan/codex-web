@@ -11,7 +11,11 @@ A self-hosted browser bridge for Codex Desktop, with Full/Lite interfaces, mobil
 - WebSocket 断线续接、命令去重、独立标签页与会话生命周期管理。
 - 历史分页、已回答问题状态、子代理历史与标题、发送后草稿处理。
 - 浏览器面板、可视化沙箱、可选 Sub2API 用量面板。
+- 浏览器本机剪贴板、MCP App 与 Code Review、后台自动化调度。
+- 启动预加载与功能配置、不可变静态资源发布、原生订阅与有界日志管理。
 - Windows 启停脚本，以及源码和 Git 历史的发布前隐私检查。
+
+手机设置在 768px 及以下使用分类列表和独立详情页。点击分类进入详情，左上角返回分类；搜索、分类行和表单复用 Desktop 组件。桌面保留双栏布局。
 
 公开仓库只包含项目源码、补丁和通用文档。构建时从官方地址下载 Desktop 归档并在本机应用补丁。
 
@@ -61,6 +65,8 @@ GitHub CI 检查隐私，并在 Windows 与 Linux 上构建、运行验收。初
 ## 维护
 
 后续定制和上游同步流程见 [维护与更新](docs/maintenance.md)。Desktop 版本升级见 [UPGRADING.md](UPGRADING.md)，运行参数和可选统计功能见 [配置](docs/configuration.md)。
+
+浏览器能力见 [客户端能力](docs/client-capabilities.md)，代码审查见 [Code Review](docs/code-review.md)，后台任务见 [自动化](docs/automations.md)。启动和资源发布见 [启动初始化](ops/STARTUP-INITIALIZATION.md) 与 [静态资源缓存](ops/STATIC-ASSET-CACHING.md)，运行故障处理见 [可靠性边界](docs/runtime-reliability.md)。
 
 ## 安全与许可
 

@@ -232,3 +232,23 @@ test('sustained stale-page notifications cannot reset an acknowledged active pag
  assert.equal(active.frames.filter(f=>f.type==='renderer-reset').length,0);
  assert(t.sessions.bytes<=4096);active.lease.expire('done');for(const c of stale)c.lease.expire('done');
 });
+
+test('buffer diagnostics attribute retained bytes and overflow without recording payloads or arbitrary labels', () => {
+ const records=[];
+ const s=new RendererSessions(async()=>({}),()=>{}, {graceMs:7200000,sessionBytes:4096,totalBytes:8192,sessions:2},
+  (event,id,document,fields)=>records.push({event,...fields}));
+ const a=attach(s);const epoch=a.ready();
+ a.lease.send({type:'ipc-main-event',channel:'private-channel',args:[{type:'fetch-response',body:'private-response'}]});
+ a.lease.send({type:'ipc-main-event',channel:'private-channel',args:[{type:'private-type',body:'private-response'}]});
+ const expectedBytes=Buffer.byteLength(JSON.stringify(a.frames.find(f=>f.type==='renderer-event')));
+ a.lease.release();
+ const profile=records.find(r=>r.event==='buffer_profile'&&r.phase==='release'&&r.category==='fetch-response');
+ assert.equal(profile.bytes,expectedBytes);assert.equal(profile.events,1);assert.equal(profile.maxEventBytes,expectedBytes);
+ assert(records.some(r=>r.category==='ipc-event-other'));
+ const b=attach(s,'tab','document',epoch,1);b.ready();
+ assert.equal(records.filter(r=>r.phase==='replay'&&r.category==='fetch-response').length,0,'Acknowledged bytes must be removed from the profile');
+ b.lease.send({type:'message-port-message',data:'private-response'.repeat(1000)});
+ assert(records.some(r=>r.event==='overflow'&&r.category==='message-port-message'&&r.incomingBytes>4096));
+ assert(b.frames.some(f=>f.type==='renderer-reset'));
+ assert(!JSON.stringify(records).includes('private-'),'Diagnostic output must exclude unknown types, channels and contents');
+});

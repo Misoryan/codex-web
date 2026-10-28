@@ -18,22 +18,26 @@ const moduleUnderTest = new Module(__filename);
 moduleUnderTest.paths = module.paths;
 moduleUnderTest._compile(ts.transpileModule(fs.readFileSync('src/server/renderer-sessions.ts', 'utf8'), {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, __filename);
 const {RendererSessions} = moduleUnderTest.exports;
-let created = 0, connections = 0, calls = 0, holdPongs = false, replay = false;
+let created = 0, connections = 0, calls = 0, holdPongs = false, replay = false, loseCommandAck = false;
+const telemetry = [];
 const live = new Set(), delayedPongs = [], replayFrames = [];
 const sessions = new RendererSessions(async () => ({id: ++created}), () => {});
 const diagnostics = fs.readFileSync('ops/startup-status.js', 'utf8');
 const server = http.createServer((request, response) => {
+  if(request.url === '/__backend/telemetry') {
+    let body=''; request.on('data',part=>body+=part); request.on('end',()=>{telemetry.push(JSON.parse(body));response.writeHead(204).end();}); return;
+  }
   response.setHeader('content-type', 'text/html;charset=utf-8');
-  response.end(`<div id="root"><textarea aria-label="draft"></textarea></div><script>${diagnostics}</script><script>${bundle}</script>`);
+  response.end(`<head><script>${fs.readFileSync('ops/connection-telemetry.js','utf8')}</script></head><div id="root"><textarea aria-label="draft"></textarea></div><script>${diagnostics}</script><script>${bundle}</script>`);
 });
 const wss = new WebSocketServer({server});
 wss.on('connection', (socket, request) => {
-  if (!request.url.startsWith('/__backend/ipc')) {socket.send('unrelated'); socket.close(1000, 'Unrelated socket'); return;}
+  if (!request.url.startsWith('/__backend/native/ipc')) {socket.send('unrelated'); socket.close(1000, 'Unrelated socket'); return;}
   connections++;
   live.add(socket);
   socket.on('close', () => live.delete(socket));
   const params = new URL(request.url, 'http://fixture').searchParams;
-  const send = frame => {if (socket.readyState === 1) socket.send(JSON.stringify(frame));};
+  const send = frame => {if (loseCommandAck && frame.type === 'renderer-command-ack') return; if (socket.readyState === 1) socket.send(JSON.stringify(frame));};
   const lease = sessions.attach(params.get('session'), params.get('document'), params.get('epoch'), Number(params.get('ack')), socket, {
     send: frame => {
       if (replay && ['renderer-event', 'renderer-caught-up'].includes(frame.type)) replayFrames.push(() => send(frame));
@@ -114,6 +118,36 @@ async function main() {
     scenarios.push('silent connection reconnects with reason and retained draft');
     holdPongs = false;
     delayedPongs.splice(0).forEach(send => send());
+    loseCommandAck = true;
+    await page.evaluate(() => bridge.send({id:'before-background'}));
+    await page.waitForFunction(() => events.some(event=>event.accepted==='before-background'));
+    assert.equal(calls,2);
+    const beforeReturn=connections;
+    await page.evaluate(() => {
+      Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'hidden'});
+      Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.clock.runFor(60000);
+    loseCommandAck = false;
+    await page.evaluate(() => {
+      Object.defineProperty(document,'visibilityState',{configurable:true,get:()=> 'visible'});
+      Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});
+      document.dispatchEvent(new Event('visibilitychange'));
+      dispatchEvent(new Event('online'));
+    });
+    await page.waitForFunction(count=>__codexStartupDiagnostics.attempts===count && states.at(-1)==='ready',beforeReturn+1);
+    await page.clock.runFor(100);
+    assert.equal(connections,beforeReturn+1,'Foreground return replaces OPEN transport without waiting for heartbeat; simultaneous online does not double-connect');
+    assert.equal(calls,2,'Lost command ACK cannot repeat a native operation on foreground resume');
+    assert.equal(created,1);
+    assert.equal(await page.getByRole('textbox').inputValue(),'保留的草稿');
+    assert.equal(await page.evaluate(()=>identity),identity);
+    await page.waitForFunction(()=>true);
+    assert(telemetry.some(r=>r.event==='caught_up'&&r.resumed===true));
+    assert(telemetry.some(r=>r.event==='recovery_paint'&&r.resumed===true));
+    assert(!JSON.stringify(telemetry).includes('保留的草稿'));
+    scenarios.push('foreground replaces stale OPEN socket immediately, preserves draft and deduplicates lost command acknowledgement');
     await page.close();
     replay = true;
     const replayPage = await context.newPage();

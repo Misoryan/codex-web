@@ -1,22 +1,24 @@
 const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 const assert = require('node:assert/strict');
 const {createHash} = require('node:crypto');
 const {chromium} = require('@playwright/test');
 
 const hash = data => createHash('sha256').update(data).digest('hex');
 const oldCss = Buffer.from(':root { --style-update-fixture: previous-release; }');
-const newCss = fs.readFileSync('scratch/asar/webview/lite/assets/mobile.css');
 const newHtml = fs.readFileSync('scratch/asar/webview/lite/index.html','utf8');
 const href = newHtml.match(/href="([^"]*\/mobile\.css[^"]*)"/)[1];
+const stylesheetPath = new URL(href, 'https://example.invalid').pathname;
+const newCss = fs.readFileSync(path.join('scratch/asar/webview', stylesheetPath));
 
 (async () => {
   assert.notEqual(hash(oldCss),hash(newCss),'This scenario requires an actual stylesheet change');
   let updated = false, cssRequests = 0;
   const server = http.createServer((req,res) => {
-    if (req.url.startsWith('/lite/assets/mobile.css')) {
+    if (req.url === '/lite/assets/mobile.css' || req.url === href) {
       res.setHeader('Cache-Control','private, max-age=31536000');
-      cssRequests++;res.setHeader('Content-Type','text/css');res.end(updated ? newCss : oldCss);
+      cssRequests++;res.setHeader('Content-Type','text/css');res.end(updated && req.url === href ? newCss : oldCss);
     } else {
       res.setHeader('Cache-Control','no-store');
       res.setHeader('Content-Type','text/html');

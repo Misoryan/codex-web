@@ -2,6 +2,7 @@ import { ResumableBridge, showConnectionState } from "./resumable-bridge";
 import { installBrowserView } from "./browser-view";
 import { PersistedStateDecoder } from "../shared/persisted-state-wire";
 import { browserSystemFonts } from "./system-fonts";
+import { codexWebClientPlatform, codexWebInstallClientBridge } from "./client-capabilities.js";
 import {
   mapBrowserPathToInitialRoute,
   mapMemoryPathToBrowserPath,
@@ -295,6 +296,7 @@ function shouldCloseSidebarForMemoryPath(path: string): boolean {
   return (
     path === "/" ||
     path.startsWith("/local/") ||
+    path.startsWith("/mcp-app/") ||
     path === "/skills" ||
     path === "/automations" ||
     path === "/settings" ||
@@ -360,16 +362,18 @@ Object.assign(window, {codexBrowserAppInfo: {
 
 Object.assign(globalThis, {
   process: {
-    arch: "arm64",
-    platform: "darwin",
-    versions: {
-      electron: "41.2.0",
-    },
+    platform: codexWebClientPlatform(),
+    versions: {},
   },
 });
 
 electronShim.overrideAdapter = {
   getGateOverride(evaluation) {
+    if (evaluation.name === "223049465" || evaluation.name === "1892621033") {
+      // Use this host's GitHub CLI for Code Review and account discovery.
+      return { ...evaluation, value: false };
+    }
+
     if (evaluation.name === "2911712394") {
       return {
         ...evaluation,
@@ -586,6 +590,7 @@ export const contextBridge = {
     // Browser menus render in the page; the Electron popup cannot reach this client.
     if (_key === "electronBridge" && isRecord(_api)) {
       delete _api.showContextMenu;
+      codexWebInstallClientBridge(_api);
       _api.uploadFiles = uploadFiles;
       installBrowserView((channel, ...args) => ipcRenderer.invoke(channel, ...args));
     }

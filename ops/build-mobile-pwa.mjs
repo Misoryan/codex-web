@@ -1,3 +1,4 @@
+import {withStartupPreloads} from './startup-preloads.mjs';
 import {readFile,writeFile,copyFile} from 'node:fs/promises';
 import sharp from 'sharp';
 import {withStartupAssets} from './startup-assets.mjs';
@@ -17,6 +18,7 @@ html=html.replace(/href="\/assets\/mobile\.css(?:\?[^"]*)?"/,'href="/assets/mobi
 const scriptVersion=createHash('sha256').update(await readFile(new URL('mobile-pwa.js',import.meta.url))).digest('hex').slice(0,12);
 html=html.replace(/src="\/assets\/mobile-pwa\.js(?:\?[^" ]*)?"/,'src="/assets/mobile-pwa.js?v='+scriptVersion+'"');
 html=withPwaHead(html);
+html=await withStartupPreloads(html,fileURLToPath(root),'/');
 html=await withStartupAssets(html,fileURLToPath(root),'/');
 await writeFile(new URL('index.html',root),html);
 await copyFile(new URL('mobile.css',import.meta.url),new URL('assets/mobile.css',root));

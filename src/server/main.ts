@@ -24,7 +24,13 @@ import { RendererSessions } from "./renderer-sessions";
 import { StatsigCache } from "./statsig-cache";
 import { PersistedStateEncoder } from "../shared/persisted-state-wire";
 import { registerSub2ApiUsage } from "./sub2api-usage";
+import { registerLocalProfile } from "./local-profile";
+import { registerFeatureConfig } from "./feature-config";
+import { registerMcpAppDocuments } from "./mcp-app-documents";
 import { MonitoringDestination, ServerMonitoring, installHttpMonitoring, requestFields, errorFields, identity } from "./observability";
+import { installProcessLogging } from "./process-logging";
+
+let processLogging: ReturnType<typeof installProcessLogging> | undefined;
 
 type ServerOptions = {
   host: string;
@@ -246,7 +252,7 @@ type RendererWindow = {
 };
 
 type IpcMainBridgeState = {
-  synchronizeGlobalState?: (store: Parameters<typeof synchronizeGlobalState>[0], write: (state: Map<string, unknown>) => void) => void;
+  synchronizeGlobalState?: (store: Parameters<typeof synchronizeGlobalState>[0], write: (state: Map<string, unknown>) => void | Promise<void>) => void;
   onGlobalStateChanged?: (keys: string[]) => void;
   setRendererWindowFactory?: (factory: () => Promise<RendererWindow>) => void;
   sendToRenderer?: (
@@ -433,18 +439,28 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     disableRequestLogging: true, genReqId: () => randomUUID(),
   });
   const monitoring = new ServerMonitoring(app.log);
+  await registerMcpAppDocuments(app);
   installHttpMonitoring(app, monitoring);
   app.addHook("onClose", async () => { monitoring.event("server.stop"); await destination.close(); });
-  app.get("/__backend/health", async () => ({ ok: true, runId: monitoring.runId, droppedLogRecords: destination.droppedRecords }));
+  app.get("/__backend/health", async () => {
+    const storage = await fs.statfs(process.cwd());
+    return { ok: true, runId: monitoring.runId, droppedLogRecords: destination.droppedRecords,
+      consoleDroppedLogRecords: processLogging?.droppedRecords ?? 0,
+      availableDiskBytes: storage.bavail * storage.bsize };
+  });
   app.post("/__backend/telemetry", {
     bodyLimit: 4096,
     schema: { body: { type: "object", additionalProperties: false, required: ["event", "visit"], properties: {
-      event: { type: "string", enum: ["visit", "open", "ready", "close", "error", "online", "offline", "visible", "hidden", "pagehide", "resource_error", "js_error"] },
+      event: { type: "string", enum: ["visit", "open", "ready", "close", "error", "online", "offline", "visible", "hidden", "pagehide", "resource_error", "js_error", "first_message", "caught_up", "recovery_paint", "navigation", "resources_ready", "network_change"] },
       visit: { type: "string", format: "uuid" }, session: { type: "string", format: "uuid" }, document: { type: "string", format: "uuid" },
       build: { type: "string", pattern: "^[a-f0-9]{12}$" }, mode: { type: "string", enum: ["full", "lite"] },
       standalone: { type: "boolean" }, online: { type: "boolean" }, visible: { type: "boolean" },
       elapsedMs: { type: "integer", minimum: 0, maximum: 2147483647 }, durationMs: { type: "integer", minimum: 0, maximum: 2147483647 },
       code: { type: "integer", minimum: 0, maximum: 4999 }, attempt: { type: "integer", minimum: 0, maximum: 1000000 },
+      resumed: { type: "boolean" },
+      networkType: { type: "string", enum: ["wifi", "cellular", "ethernet", "none", "unknown", "other", "bluetooth", "wimax"] },
+      effectiveType: { type: "string", enum: ["slow-2g", "2g", "3g", "4g"] },
+      ...Object.fromEntries(["rttMs", "downlinkKbps", "replayEvents", "replayBytes", "foregroundMs", "assetCount", "assetsComplete", "assetTransferBytes", "assetEncodedBytes", "assetsEndMs", "dnsMs", "connectMs", "tlsMs", "ttfbMs", "htmlEndMs", "domReadyMs", "navigationTransferBytes", "navigationMs"].map(name => [name, { type: "integer", minimum: 0, maximum: 2147483647 }])),
     } } },
   }, async (request, reply) => {
     const body = request.body as Record<string, any>;
@@ -453,6 +469,8 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     return reply.code(204).send();
   });
   await registerSub2ApiUsage(app);
+  await registerLocalProfile(app);
+  await registerFeatureConfig(app);
   const websocketServer = new WebSocketServer({
     noServer: true,
     // Desktop sends multi-megabyte feature snapshots at startup. Use the
@@ -537,11 +555,11 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     const requestUrl = request.url ?? "/";
     const host = request.headers.host ?? "localhost";
     const url = new URL(requestUrl, `http://${host}`);
-    if (url.pathname === "/__backend/browser-stream") {
+    if (url.pathname === "/__backend/native/browser-stream") {
       browserStreamUpgrade(request, socket, head);
       return;
     }
-    if (url.pathname !== "/__backend/ipc") {
+    if (url.pathname !== "/__backend/native/ipc") {
       monitoring.event("ws.rejected", { ...requestFields(request), reason: "unknown_route" });
       socket.destroy();
       return;
@@ -794,4 +812,12 @@ async function main(args: string[]) {
   await startIpcBridgeServer(options);
 }
 
-if (require.main === module) main(process.argv.slice(2)).catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) {
+  const logging = processLogging = installProcessLogging(path.resolve(__dirname, "../../runtime/console"));
+  process.once("beforeExit", () => { void logging.close(); });
+  main(process.argv.slice(2)).catch(async error => {
+    console.error(error);
+    await logging.close();
+    process.exitCode = 1;
+  });
+}

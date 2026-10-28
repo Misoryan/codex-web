@@ -7,7 +7,7 @@ if (Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -State Listen 
 if (-not $env:CODEX_CLI_PATH) {
     $env:CODEX_CLI_PATH = & (Join-Path $root 'ops/resolve-cli.ps1')
 }
-$node = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $runtime = Join-Path $root 'runtime'
 $temporary = Join-Path $runtime 'tmp'
 New-Item -ItemType Directory -Path $temporary -Force | Out-Null

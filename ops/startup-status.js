@@ -1,7 +1,20 @@
-// Record startup timing without reading messages or drafts.
+// Check access through the same gateway as Codex, without reading messages or drafts.
 (() => {
   const state = window.__codexStartupDiagnostics = {version: 2, phase: '加载页面', errors: [], receivedBytes: 0, connections: []};
   const now = () => Math.round(performance.now());
+  if (location.protocol === 'https:') {
+    let refreshedAt = 0;
+    const refreshSession = () => {
+      if (document.hidden || Date.now() - refreshedAt < 3600000) return;
+      refreshedAt = Date.now();
+      fetch('/__backend/health', {credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(8000)})
+        .then(async response => { state.authStatus = response.ok ? (await response.json()).ok === true ? 200 : '响应异常' : response.status; })
+        .catch(() => { refreshedAt = 0; state.authStatus = '连接超时'; });
+    };
+    refreshSession();
+    addEventListener('pageshow', refreshSession);
+    document.addEventListener('visibilitychange', refreshSession);
+  }
   if ('serviceWorker' in navigator && isSecureContext && location.pathname.startsWith('/lite/')) {
     const controller = navigator.serviceWorker.controller;
     navigator.serviceWorker.getRegistration('/lite/')
@@ -18,10 +31,17 @@
   window.WebSocket = class extends NativeWebSocket {
     constructor(...args) {
       super(...args);
-      if (new URL(args[0], location.href).pathname !== '/__backend/ipc') return;
+      const url = new URL(args[0], location.href);
+      if (url.pathname !== '/__backend/native/ipc') return;
       const connection = {connectMs: now(), receivedBytes: 0};
       state.connections.push(connection);
       state.attempts = (state.attempts || 0) + 1;
+      const attempt = state.attempts;
+      const notify = (event, fields = {}) => dispatchEvent(new CustomEvent('codex-startup-connection', {detail: {
+        event, attempt, session: url.searchParams.get('session'), document: url.searchParams.get('document'),
+        durationMs: now() - connection.connectMs, ...fields,
+      }}));
+      notify('connecting');
       if (state.connections.length > 5) state.connections.shift();
       for (const key of ['openMs', 'handshakeMs', 'firstMessageMs', 'lastMessageMs', 'closeCode', 'closeReason', 'readyMs']) delete state[key];
       state.connectMs = connection.connectMs;
@@ -29,6 +49,7 @@
       this.addEventListener('open', () => {
         connection.openMs = now();
         connection.handshakeMs = connection.openMs - connection.connectMs;
+        notify('open');
         if (state.connections.at(-1) === connection) {
           state.openMs = connection.openMs;
           state.handshakeMs = connection.handshakeMs;
@@ -37,6 +58,7 @@
       });
       this.addEventListener('message', event => {
         const messageMs = now();
+        if (connection.firstMessageMs == null) notify('first_message');
         connection.firstMessageMs ??= messageMs;
         connection.lastMessageMs = messageMs;
         if (state.connections.at(-1) === connection) {
@@ -49,12 +71,13 @@
       });
       this.addEventListener('close', event => {
         Object.assign(connection, {closeMs: now(), closeCode: event.code, closeReason: event.reason, wasClean: event.wasClean});
+        notify('close', {code: event.code});
         if (state.connections.at(-1) !== connection) return;
         state.closeCode = event.code;
         state.closeReason = event.reason;
         state.phase = '连接已断开';
       });
-      this.addEventListener('error', () => { if (state.connections.at(-1) === connection) state.phase = '后端连接失败'; });
+      this.addEventListener('error', () => { notify('error'); if (state.connections.at(-1) === connection) state.phase = '后端连接失败'; });
     }
   };
   addEventListener('codex-connection-state', event => {
@@ -77,6 +100,7 @@
     if (!document.body) return;
     if (document.querySelector('[contenteditable="true"]')) {
       state.composerMs = now();
+      requestAnimationFrame(() => requestAnimationFrame(() => dispatchEvent(new Event('codex-startup-rendered'))));
       clearInterval(timer); panel?.remove(); progressPanel?.remove(); return;
     }
     if (!progressPanel) {
@@ -136,7 +160,9 @@
       buttons[1].onclick = () => navigator.clipboard.writeText(JSON.stringify(state, null, 2)).then(() => { buttons[1].textContent = '已复制'; });
       document.body.append(panel);
     }
+    const auth = state.authStatus === 401 ? '访问认证未通过，请重新打开访问入口。'
+      : state.authStatus === 403 ? '当前入口拒绝访问，请检查访问权限。' : '';
     const latest = state.connections.at(-1);
-    panel.querySelector('pre').textContent = `${state.phase}（${Math.round(now() / 1000)} 秒）\n连接尝试：${state.attempts || 0} 次；最近握手：${latest?.handshakeMs ?? '未建立'} ms\n最近连接首条响应：${latest?.firstMessageMs == null ? '未收到' : latest.firstMessageMs - latest.connectMs} ms\n断开原因：${latest?.closeReason || (latest?.closeCode == null ? '无' : String(latest.closeCode))}\n等待资源：${state.pendingResources.join('、') || '无'}\n资源错误：${state.errors.join('、') || '无'}`;
+    panel.querySelector('pre').textContent = `${auth || state.phase}（${Math.round(now() / 1000)} 秒）\n连接尝试：${state.attempts || 0} 次；最近握手：${latest?.handshakeMs ?? '未建立'} ms\n最近连接首条响应：${latest?.firstMessageMs == null ? '未收到' : latest.firstMessageMs - latest.connectMs} ms\n断开原因：${latest?.closeReason || (latest?.closeCode == null ? '无' : String(latest.closeCode))}\n等待资源：${state.pendingResources.join('、') || '无'}\n资源错误：${state.errors.join('、') || '无'}；认证：${state.authStatus ?? '检查中'}`;
   }, 500);
 })();

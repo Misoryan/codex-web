@@ -24,7 +24,8 @@ const patterns = [
   ['recorded conversation ID', /\b01[0-9a-f]{6}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i],
   ['embedded bitmap', /data:image\/(?:png|jpe?g|webp);base64,[A-Za-z0-9+/=]{256,}/i],
 ];
-const allowedHosts = /^(?:localhost|127\.0\.0\.1|(?:.*\.)?example\.(?:com|invalid|org)|attacker\.invalid|fixture|local|github\.com|api\.github\.com|raw\.githubusercontent\.com|persistent\.oaistatic\.com|registry\.npmjs\.org|www\.electronjs\.org|electronjs\.org|aka\.ms|nix-community\.github\.io|paulmillr\.com)$/i;
+// ab.chatgpt.com is the pinned application's public feature-evaluation service.
+const allowedHosts = /^(?:localhost|127\.0\.0\.1|(?:.*\.)?example\.(?:com|invalid|org)|attacker\.invalid|fixture|local|github\.com|api\.github\.com|raw\.githubusercontent\.com|persistent\.oaistatic\.com|ab\.chatgpt\.com|registry\.npmjs\.org|www\.electronjs\.org|electronjs\.org|aka\.ms|nix-community\.github\.io|paulmillr\.com)$/i;
 const provenance = JSON.parse(await fs.readFile('provenance.json', 'utf8'));
 const baseline = git(['grep', '-I', '-h', '-e', '://', '-e', '@', provenance.upstreamCommit, '--']);
 const upstreamHosts = new Set([...baseline.matchAll(/(?:https?|wss?):\/\/([A-Za-z0-9.-]+)(?::\d+)?/g)].map(match => match[1].toLowerCase()));

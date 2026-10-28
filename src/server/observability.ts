@@ -1,64 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { IncomingMessage } from "node:http";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
+export { MonitoringDestination } from "./log-storage";
 
 type Fields = Record<string, string | number | boolean | undefined>;
-
-// Pino supplies JSON encoding; this destination bounds disk and queued writes.
-export class MonitoringDestination {
-  private stream?: fs.WriteStream;
-  private date = "";
-  private bytes = 0;
-  private part = 0;
-  private retryAt = 0;
-  private dropped = 0;
-  private closed = false;
-  constructor(readonly directory: string) {}
-  write(line: string): void {
-    if (this.closed) return;
-    if (Date.now() < this.retryAt) { this.dropped++; return; }
-    const date = new Date().toISOString().slice(0, 10);
-    try {
-      if (!this.stream || this.date !== date || this.bytes >= 10 * 1024 * 1024) {
-        this.stream?.end();
-        if (this.date !== date) this.part = 0;
-        this.date = date;
-        fs.mkdirSync(this.directory, { recursive: true });
-        const file = path.join(this.directory, `server-${date}-${process.pid}-${this.part++}.jsonl`);
-        this.bytes = fs.existsSync(file) ? fs.statSync(file).size : 0;
-        const stream = this.stream = fs.createWriteStream(file, { flags: "a" });
-        stream.on("error", () => {
-          if (this.stream === stream) this.stream = undefined;
-          this.retryAt = Date.now() + 60_000;
-          console.warn("[monitoring] log file unavailable; retrying in 60 seconds");
-        });
-        const old = fs.readdirSync(this.directory).filter(name => /^server-.*\.jsonl$/.test(name))
-          .map(name => ({ name, time: fs.statSync(path.join(this.directory, name)).mtimeMs }))
-          .sort((a, b) => b.time - a.time);
-        for (const entry of old.slice(7)) if (path.join(this.directory, entry.name) !== file)
-          fs.unlinkSync(path.join(this.directory, entry.name));
-      }
-      if (this.stream.writableLength > 1024 * 1024) { this.dropped++; return; }
-      this.bytes += Buffer.byteLength(line);
-      this.stream.write(line);
-    } catch {
-      this.retryAt = Date.now() + 60_000;
-      this.dropped++;
-      console.warn("[monitoring] log destination unavailable; retrying in 60 seconds");
-    }
-  }
-  get droppedRecords(): number { return this.dropped; }
-  async close(): Promise<void> {
-    this.closed = true;
-    const stream = this.stream;
-    this.stream = undefined;
-    if (stream && !stream.destroyed) await new Promise<void>(resolve => stream.end(resolve));
-  }
-}
 
 export function identity(value: string | null | undefined): string | undefined {
   return value ? createHash("sha256").update(value).digest("hex").slice(0, 16) : undefined;
@@ -93,7 +40,7 @@ export function requestFields(request: IncomingMessage): Fields {
   };
 }
 
-const closeReasons = new Set(["Document closed", "Page suspended", "Network offline", "Heartbeat timeout", "Handshake timeout", "Renderer state invalid", "Renderer reset required", "Renderer connection replaced"]);
+const closeReasons = new Set(["Document closed", "Page suspended", "Network offline", "Network online", "Foreground return", "Heartbeat timeout", "Handshake timeout", "Renderer state invalid", "Renderer reset required", "Renderer connection replaced"]);
 
 export class ServerMonitoring {
   readonly runId = randomUUID();
