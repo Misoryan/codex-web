@@ -8,6 +8,8 @@ import {promisify} from 'node:util';
 import yauzl from 'yauzl';
 import {extractAll} from '@electron/asar';
 import sharp from 'sharp';
+import {patchAutomationSchedulerFile} from './automation-scheduler-patch.mjs';
+import {patchNativeRpcSubscriptionFile} from './native-rpc-subscription-patch.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 process.chdir(root);
@@ -86,7 +88,7 @@ const patches = [
   'webview-prosemirror-inputmode', 'webview-use-atfs-for-local-files',
   'webview-statsig-override-adapter', 'webview-prompt-search-param', 'sentry-disable-shell',
   'sentry-disable-webview', 'preload-disable-device-check', 'webview-safe-header-left',
-  'app-host-json-rpc', 'app-host-browser-windows', 'app-host-global-state-sync', 'web-thread-release',
+  'app-host-json-rpc', 'app-host-browser-windows', 'app-host-global-state-sync', 'app-host-console-capacity', 'web-thread-release',
 ];
 const formatted = new Set();
 for (const name of patches) {
@@ -102,5 +104,7 @@ await fs.writeFile('runtime/tmp/prettier-ignore', '');
 run(process.execPath, ['node_modules/prettier/bin/prettier.cjs', '--ignore-path', 'runtime/tmp/prettier-ignore', '--write', ...formatted]);
 for (const name of patches) run('git', ['apply', '--no-index', '--unsafe-paths', '--directory=scratch/asar', `patches/${name}.patch`]);
 await fs.rm('scratch/asar/node_modules/better-sqlite3', {recursive: true});
-for (const file of ['scripts/app-tools-patch.cjs', 'scripts/bundle-browser-runtime.cjs', 'scripts/patch-webview.mjs']) run(process.execPath, [file]);
+for (const file of ['scripts/app-tools-patch.cjs', 'scripts/bundle-browser-runtime.cjs', 'scripts/patch-webview.mjs', 'scripts/patch-native-history.mjs']) run(process.execPath, [file]);
+await patchAutomationSchedulerFile();
+await patchNativeRpcSubscriptionFile();
 console.log(`Prepared Codex Desktop ${desktop.version}`);

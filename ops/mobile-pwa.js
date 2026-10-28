@@ -52,21 +52,6 @@ function addRefreshAction(root) {
 }
 addRefreshAction(document.documentElement);
 
-function addSettingsBack() {
-  if (!mobile.matches) return;
-  const nav = document.querySelector('nav.sidebar-navigation:has(#settings-search)');
-  const header = nav?.querySelector(':scope > div > :first-child');
-  if (!header || header.querySelector('[data-codex-settings-back]')) return;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.dataset.codexSettingsBack = '';
-  button.setAttribute('aria-label', '返回应用');
-  button.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>';
-  button.addEventListener('click', () => window.dispatchEvent(new MessageEvent('message', {data: {type: 'navigate-to-route', path: '/'}})));
-  header.prepend(button);
-}
-addSettingsBack();
-
 function markTerminalLauncher(root) {
   if (!(root instanceof Element)) return;
   const buttons = new Set(root.querySelectorAll('button, [role="menuitem"]'));
@@ -91,7 +76,6 @@ new MutationObserver(records => {
       addRefreshAction(root);
     }
   }
-  addSettingsBack();
   schedulePwaThemeColor();
 }).observe(document.documentElement, {subtree: true, childList: true, characterData: true});
 document.addEventListener('click', event => {

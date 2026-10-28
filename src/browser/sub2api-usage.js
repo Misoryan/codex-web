@@ -13,6 +13,7 @@ export function createSub2ApiUsage(React, Menu, Disclosure, UsageIcon) {
     weeklyRank: chinese ? "周排行" : "Weekly Rank",
     monthlyRank: chinese ? "月排行" : "Monthly Rank",
     noUsage: chinese ? "本期暂无用量" : "No usage this period",
+    loading: chinese ? "正在加载统计…" : "Loading usage…",
     refreshFailed: chinese
       ? "刷新失败，稍后重试；已有数据继续保留"
       : "Refresh failed; keeping the last successful data",
@@ -26,7 +27,8 @@ export function createSub2ApiUsage(React, Menu, Disclosure, UsageIcon) {
     month: text.monthlyRank,
   };
   const cache = {},
-    pending = {};
+    pending = {},
+    failures = {};
   async function read(range) {
     if (pending[range]) return pending[range];
     pending[range] = (async () => {
@@ -55,13 +57,18 @@ export function createSub2ApiUsage(React, Menu, Disclosure, UsageIcon) {
             ? data.capacity
             : cache[range]?.capacity,
         };
+        failures[range] = 0;
       } catch {
+        failures[range] = (failures[range] || 0) + 1;
         cache[range] = {
           ...cache[range],
           enabled: true,
           stale: true,
           activity: null,
-          nextRefreshAt: new Date(Date.now() + 60000).toISOString(),
+          networkFailure: true,
+          nextRefreshAt: new Date(
+            Date.now() + Math.min(60000, 5000 * 2 ** Math.min(failures[range] - 1, 4)),
+          ).toISOString(),
         };
       }
       return cache[range];
@@ -71,7 +78,7 @@ export function createSub2ApiUsage(React, Menu, Disclosure, UsageIcon) {
     return pending[range];
   }
   const due = (data) =>
-    Math.min(
+    data?.networkFailure ? Date.parse(data.nextRefreshAt) : Math.min(
       Date.parse(data?.nextRefreshAt) || 0,
       Date.parse(data?.capacity?.nextRefreshAt || data?.nextRefreshAt) || 0,
     );
@@ -198,45 +205,47 @@ export function createSub2ApiUsage(React, Menu, Disclosure, UsageIcon) {
       ),
     );
   }
-  return function Sub2ApiUsage({ active }) {
+  return function Sub2ApiUsage() {
     const [state, setState] = React.useState(() => ({ ...cache }));
     const [open, setOpen] = React.useState(true);
     const [openRank, setOpenRank] = React.useState(null);
     const weeklyId = React.useId();
     React.useEffect(() => {
-      if (!active) return;
-      let disposed = false,
-        timer;
-      const refresh = async () => {
-        clearTimeout(timer);
+      let disposed = false;
+      const timers = {}, running = new Set();
+      // The menu may have closed while a shared request completed.
+      setState({ ...cache });
+      const refresh = async (range, online = false) => {
+        clearTimeout(timers[range]);
         if (disposed || document.hidden) return;
-        await Promise.all(
-          Object.keys(ranges).map(async (range) => {
-            if (due(cache[range]) <= Date.now()) await read(range);
-          }),
-        );
+        if (running.has(range)) return;
+        running.add(range);
+        if (due(cache[range]) <= Date.now() || (online && cache[range]?.networkFailure))
+          await read(range);
+        running.delete(range);
         if (disposed) return;
+        // Publish each response immediately; a slow month must not hide today.
         setState({ ...cache });
-        timer = setTimeout(
-          refresh,
-          Math.max(
-            60000,
-            Math.min(...Object.values(cache).map(due)) - Date.now(),
-          ),
+        timers[range] = setTimeout(
+          () => refresh(range),
+          Math.max(cache[range]?.networkFailure ? 5000 : 60000, due(cache[range]) - Date.now()),
         );
       };
       const visibility = () => {
-        if (document.hidden) clearTimeout(timer);
-        else refresh();
+        if (document.hidden) Object.values(timers).forEach(clearTimeout);
+        else Object.keys(ranges).forEach(range => refresh(range));
       };
+      const online = () => Object.keys(ranges).forEach(range => refresh(range, true));
       document.addEventListener("visibilitychange", visibility);
-      refresh();
+      window.addEventListener("online", online);
+      Object.keys(ranges).forEach(range => refresh(range));
       return () => {
         disposed = true;
-        clearTimeout(timer);
+        Object.values(timers).forEach(clearTimeout);
         document.removeEventListener("visibilitychange", visibility);
+        window.removeEventListener("online", online);
       };
-    }, [active]);
+    }, []);
     if (Object.values(state).some((data) => data.enabled === false))
       return null;
     const capacity = Object.values(state)
@@ -331,6 +340,9 @@ export function createSub2ApiUsage(React, Menu, Disclosure, UsageIcon) {
         ...Object.keys(ranges).map((range) =>
           h(Rank, { key: range, range, data: state[range], activity, open: openRank === range, onOpenChange: (next) => setOpenRank(next ? range : null) }),
         ),
+        Object.keys(ranges).some(range => !state[range])
+          ? h("div", { role: "status", className: "px-row-x py-1 text-xs text-codex-description" }, text.loading)
+          : null,
         failed
           ? h(
               "div",

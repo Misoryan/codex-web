@@ -1,5 +1,20 @@
 import { randomUUID } from "node:crypto";
 type Transport = { send: (frame: unknown) => void; close: () => void };
+// Only fixed protocol labels may enter diagnostics; never channels, IDs or data.
+const eventKinds = new Set(["fetch-response", "worker-response", "worker-main-rpc-response", "mcp-response", "persisted-atom-sync", "persisted-atom-updated", "lite-persisted-state-delta", "global-state-updated", "shared-object-updated"]);
+export function rendererEventCategory(payload: unknown): string {
+  const message = payload as { type?: string; args?: { type?: string }[] } | null;
+  if (message?.type === "ipc-main-event") {
+    const kind = message.args?.[0]?.type;
+    return kind && eventKinds.has(kind) ? kind : "ipc-event-other";
+  }
+  switch (message?.type) {
+    case "ipc-renderer-invoke-result": case "workspace-directory-entries-result":
+    case "message-port-message": case "message-port-close": return message.type;
+    default: return "other";
+  }
+}
+type BufferedEvent = { data: string; size: number; category: string };
 type Entry<W> = {
   document: string;
   epoch: string;
@@ -8,7 +23,8 @@ type Entry<W> = {
   transport?: Transport;
   timer?: ReturnType<typeof setTimeout>;
   detachedAt?: number;
-  events: Map<number, string>;
+  events: Map<number, BufferedEvent>;
+  profiledAt: number;
   bytes: number;
   head: number;
   ack: number;
@@ -31,6 +47,7 @@ export class RendererSessions<W> {
   ) {}
   private discard(id: string, entry: Entry<W>, reason: string) {
     if (this.sessions.get(id) !== entry) return;
+    this.profile(id, entry, "discard");
     this.observe?.("discard", id, entry.document, { reason, bufferedBytes: entry.bytes, pendingEvents: entry.events.size });
     this.sessions.delete(id);
     clearTimeout(entry.timer);
@@ -41,6 +58,18 @@ export class RendererSessions<W> {
     entry.transport?.close();
     entry.transport = undefined;
     void entry.window.then(this.destroy).catch(() => {});
+  }
+  private profile(id: string, entry: Entry<W>, phase: string) {
+    if (!this.observe) return;
+    const groups = new Map<string, { bytes: number; events: number; maxEventBytes: number }>();
+    for (const { category, size } of entry.events.values()) {
+      const group = groups.get(category) ?? { bytes: 0, events: 0, maxEventBytes: 0 };
+      group.bytes += size; group.events++; group.maxEventBytes = Math.max(group.maxEventBytes, size);
+      groups.set(category, group);
+    }
+    for (const [category, group] of groups) this.observe("buffer_profile", id, entry.document,
+      { phase, category, ...group, detached: !entry.transport, head: entry.head, ack: entry.ack });
+    entry.profiledAt = Date.now();
   }
   private evictDetached(): boolean {
     let oldest: [string, Entry<W>] | undefined;
@@ -83,6 +112,7 @@ export class RendererSessions<W> {
         window: this.create(),
         owner,
         events: new Map(),
+        profiledAt: 0,
         bytes: 0,
         head: 0,
         ack: 0,
@@ -115,9 +145,8 @@ export class RendererSessions<W> {
         value > current.head
       )
         throw Error("确认序号无效");
-      for (const [seq, data] of current.events) {
+      for (const [seq, { size }] of current.events) {
         if (seq > value) break;
-        const size = Buffer.byteLength(data);
         current.events.delete(seq);
         current.bytes -= size;
         this.bytes -= size;
@@ -133,7 +162,9 @@ export class RendererSessions<W> {
         payload,
       });
       const size = Buffer.byteLength(data);
+      const category = rendererEventCategory(payload);
       if (current.bytes + size > this.limits.sessionBytes || size > this.limits.totalBytes) {
+        this.observe?.("overflow", id, current.document, { category, incomingBytes: size, bufferedBytes: current.bytes, limitBytes: this.limits.sessionBytes });
         this.discard(id, current, "当前页面未确认的数据已达上限");
         return;
       }
@@ -145,9 +176,10 @@ export class RendererSessions<W> {
         }
         if (!valid()) return;
       }
-      current.events.set(++current.head, data);
+      current.events.set(++current.head, { data, size, category });
       current.bytes += size;
       this.bytes += size;
+      if (current.bytes >= 1024 * 1024 && Date.now() - current.profiledAt >= 60_000) this.profile(id, current, "pressure");
       current.transport?.send(JSON.parse(data));
     };
     return {
@@ -159,13 +191,14 @@ export class RendererSessions<W> {
       ready: () => {
         if (!isCurrent()) return;
         this.observe?.("replay", id, document, { events: current.events.size, bufferedBytes: current.bytes, head: current.head, ack: current.ack });
+        this.profile(id, current, "replay");
         current.transport = transport;
         transport.send({
           type: "renderer-ready",
           epoch: current.epoch,
           clientAck: current.clientAck,
         });
-        for (const data of current.events.values())
+        for (const { data } of current.events.values())
           transport.send(JSON.parse(data));
         transport.send({ type: "renderer-caught-up", head: current.head });
       },
@@ -191,6 +224,7 @@ export class RendererSessions<W> {
         if (!isCurrent() || current.timer) return;
         this.observe?.("release", id, document, { graceMs: this.limits.graceMs, bufferedBytes: current.bytes });
         current.transport = undefined;
+        this.profile(id, current, "release");
         current.detachedAt = Date.now();
         current.timer = setTimeout(
           () => this.discard(id, current, "恢复窗口已过期"),

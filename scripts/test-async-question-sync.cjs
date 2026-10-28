@@ -4,9 +4,10 @@ const assert = require('node:assert/strict');
 const ts = require('typescript');
 
 async function main() {
-  const {patchAsyncQuestionSync} = await import('./async-question-sync-patch.mjs');
+  const {patchAsyncQuestionSync, patchAsyncQuestionGroups} = await import('./async-question-sync-patch.mjs');
   const initial = fs.readFileSync('scratch/asar/webview/assets/app-initial-6350d04672d0.js', 'utf8');
-  const shared = fs.readFileSync('scratch/asar/webview/assets/app-shared-8bd9d0399038.js', 'utf8');
+  const shared = patchAsyncQuestionGroups(fs.readFileSync('scratch/asar/webview/assets/app-shared-8bd9d0399038.js', 'utf8'));
+  assert.equal(patchAsyncQuestionGroups(shared), shared);
   const patched = patchAsyncQuestionSync(initial);
   assert.equal(patchAsyncQuestionSync(patched), patched);
   function extract(source, names) {
@@ -17,11 +18,23 @@ async function main() {
       return fn.getText(tree);
     }).join('\n');
   }
-  const helpers = extract(shared, ['exr', 'qH', 'Bmn', 'F5t', 'Vmn', 'tV']);
+  const helpers = extract(shared, ['exr', 'qH', 'Bmn', 'F5t', 'Vmn', 'tV', 'codexWebLatestAsyncQuestion']);
+  const replyParser = {
+    L5t: '<send_user_message_question_reply>', R5t: '</send_user_message_question_reply>',
+    B5t: {safeParse: data => ({success: true, data})},
+  };
+  const pending = vm.runInNewContext(`${helpers}\n${extract(shared, ['V5t', 'W5t', 'G5t', 'K5t', 'q5t', 'J5t', 'Y5t', 'X5t'])}\nV5t`, replyParser);
   const hostId = 'local', threadId = 'fixture-thread', turnId = 'fixture-turn';
   const key = {hostId, threadId, entityKey: `turn:${turnId}`};
   const questionId = index => JSON.stringify(['request_user_input_async', 'question-call', index]);
   const questionItem = {id: 'question-call', type: 'agentMessage', questions: [{title: 'Entry?', options: ['Lite', 'Full']}, {title: 'Page?', options: ['Initial', 'Older']}]};
+  const earlierQuestion = {...questionItem, id: 'earlier-question'};
+  const replyItem = (indexes, sourceId = questionItem.id) => ({id: 'reply', type: 'userMessage', content: [{type: 'text', text: `<send_user_message_question_reply>\n${JSON.stringify(indexes.map(index => ({questionItemId: JSON.stringify(['request_user_input_async', sourceId, index]), question: 'Question', answer: 'Answer'})))}\n</send_user_message_question_reply>`}]});
+  const status = items => pending({turnId, status: 'inProgress', items});
+  assert.equal(status([earlierQuestion, questionItem, replyItem([0, 1])]), null, 'Answering the current request clears the sidebar even if an earlier request was unanswered');
+  assert.deepEqual(Array.from(status([earlierQuestion, questionItem, replyItem([0])]).questionIds), [questionId(1)], 'Unanswered questions in the current request remain pending');
+  assert.deepEqual(Array.from(status([earlierQuestion, replyItem([0, 1], earlierQuestion.id), questionItem]).questionIds), [questionId(0), questionId(1)], 'An earlier reply cannot answer a later request');
+  assert.deepEqual(Array.from(status([questionItem, {id: 'progress', type: 'agentMessage', text: 'Continuing'}]).questionIds), [questionId(0), questionId(1)], 'Progress alone cannot dismiss a current question');
   function fixture(source) {
     const values = new Map();
     const id = value => JSON.stringify(value);
@@ -38,8 +51,7 @@ async function main() {
     const US = token(), WS = token(), DIt = token();
     const reconcile = vm.runInNewContext(`${helpers}\n${extract(source, ['mIt', 'HS'])}\nconst yue=exr, zie=Vmn; mIt`, {
       Map, Set, Date, JSON, US, WS, DIt, Pc: (_, action) => action(),
-      L5t: '<send_user_message_question_reply>', R5t: '</send_user_message_question_reply>',
-      B5t: {safeParse: data => ({success: true, data})}, jue: () => false,
+      ...replyParser, jue: () => false,
     });
     reconcile(scope, key, {turnId, items: [questionItem]});
     scope.set(DIt, hostId, new Map([[threadId, {selectedQuestionKey: {...key, itemId: questionId(0)}, questionIds: [questionId(0), questionId(1)]}]]));
@@ -50,7 +62,7 @@ async function main() {
       const content = [{type: 'text', text}];
       reconcile(scope, key, {turnId, items: [questionItem, steering ? {id: 'reply', type: 'steeringUserMessage', input: content, status} : {id: 'reply', type: 'userMessage', content}]});
     };
-    return {answer, selection, state, setDraft(index, draft) {const params = {...key, itemId: questionId(index)}; scope.set(WS, params, {...state(index), draft});}};
+    return {answer, selection, state, replaceItems(items) {reconcile(scope, key, {turnId, items});}, setDraft(index, draft) {const params = {...key, itemId: questionId(index)}; scope.set(WS, params, {...state(index), draft});}};
   }
   if (!initial.includes('CODEX_WEB_QUESTION_SYNC')) {
     const old = fixture(initial);
@@ -78,7 +90,11 @@ async function main() {
   const ordinary = fixture(patched);
   ordinary.answer([0, 1], {ordinary: true});
   assert.equal(ordinary.selection().questionIds.length, 2, 'Ordinary messages cannot dismiss unrelated questions');
-  const report = {passed: true, baselineReproduced: !initial.includes('CODEX_WEB_QUESTION_SYNC'), scenarios: ['accepted reply closes selected composer', 'partial reply selects remaining question', 'unsent draft retained', 'pending and failed replies stay pending', 'accepted steering reply clears composer', 'ordinary message leaves questions open']};
+  const superseded = fixture(patched);
+  superseded.replaceItems([questionItem, {...questionItem, id: 'later-question'}]);
+  assert.equal(superseded.selection(), null, 'A later request closes the selection for the earlier request');
+  assert.equal(superseded.state(0), null, 'A replaced question cannot leave an old draft in the composer');
+  const report = {passed: true, baselineReproduced: !initial.includes('CODEX_WEB_QUESTION_SYNC'), scenarios: ['accepted reply closes selected composer', 'partial reply selects remaining question', 'unsent draft retained', 'pending and failed replies stay pending', 'accepted steering reply clears composer', 'ordinary message leaves questions open', 'current question group controls sidebar input', 'earlier replies cannot answer later questions', 'later request removes the earlier composer selection']};
   fs.mkdirSync('runtime/public-connection', {recursive: true});
   fs.writeFileSync('runtime/public-connection/question-tests.json', JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report));

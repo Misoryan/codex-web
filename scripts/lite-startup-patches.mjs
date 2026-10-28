@@ -9,8 +9,8 @@ export async function patchLiteInitial(source){
   body=once(body,'[, a] = nn(`statsig_evaluations`),','liteStatsigPublication = tQs.useRef(), a = tQs.useCallback(value => {liteStatsigPublication.current=value;window.electronBridge.sendMessageFromView({type:`shared-object-set`,key:`statsig_evaluations`,value});},[]),');
   return once(body,'zc(r.get, `statsig_evaluations`)','liteStatsigPublication.current');
  });
- change('jUa',body=>{if(!body.includes('requestIdleCallback'))throw Error('Prefetch scheduler changed');return 'function jUa(){NUa.useEffect(()=>{import("./local-conversation-page-a83a1af2c24b.js").catch(error=>console.warn("Lite chat preload failed",error));},[]);return null}'});
- for(const [name,evidence] of [['k_c','global-dictation-enabled-changed'],['ptc','mac-menu-bar-enabled-changed'],['I_c','hotkeyWindowHotkeys'],['Cmc','remote-hosted-pip-task-state-changed'],['Xhc','tray-menu-threads-changed'],['Hcc','electron-set-badge-count'],['YUs','heartbeatTargetThreadIds'],['Ouc','rawConfig']]){
+ change('jUa',body=>{if(!body.includes('requestIdleCallback'))throw Error('Prefetch scheduler changed');return 'function jUa(){NUa.useEffect(()=>afterStartupPaint(()=>{import("./local-conversation-page-a83a1af2c24b.js").catch(error=>console.warn("Lite chat preload failed",error));}),[]);return null}'});
+ for(const [name,evidence] of [['k_c','global-dictation-enabled-changed'],['ptc','mac-menu-bar-enabled-changed'],['I_c','hotkeyWindowHotkeys'],['Cmc','remote-hosted-pip-task-state-changed'],['Xhc','tray-menu-threads-changed'],['Hcc','electron-set-badge-count'],['Ouc','rawConfig']]){
   change(name,body=>{if(!body.includes(evidence))throw Error('Lite shell effect changed: '+name);return `function ${name}(){return null}`});
  }
  for(const edit of edits.sort((a,b)=>b.start-a.start))source=source.slice(0,edit.start)+edit.text+source.slice(edit.end);
@@ -35,8 +35,6 @@ export async function patchLiteShared(source){
   });
   return () => {unsubscribe();client?.off('values_updated', notify);};
 }\n`;
- source=once(source,'i\n              .initializeAsync()','initializeLiteStatsig(i, r.sdkKey)');
- source+='\n'+(await fs.readFile(new URL('../src/browser/lite-statsig-bootstrap.js',import.meta.url),'utf8')).replace('export async function initializeLiteStatsig','async function initializeLiteStatsig');
  source=once(source,'r = this.refreshes.get(n);','r = this.refreshes.get(n) ?? (e === `routine` ? this.refreshes.get(`expanded:${this.params.requestClient.getCompatibleThreadSortKey(t ?? this.recentConversationSortKey)}`) : void 0);');
  return patchLiteHistory(source);
 }

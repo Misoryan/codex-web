@@ -1,0 +1,10 @@
+--- a/.vite/build/bootstrap-CooIJpZm.js
++++ b/.vite/build/bootstrap-CooIJpZm.js
+@@ -20076,5 +20076,7 @@
+     `code` in e &&
+     (e.code === `EPIPE` ||
++      e.code === `ENOSPC` ||
++      e.code === `EDQUOT` ||
+       e.code === `ERR_STREAM_DESTROYED` ||
+       e.code === `EBADF`)
+   );

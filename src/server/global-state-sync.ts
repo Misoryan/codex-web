@@ -1,4 +1,4 @@
-import { readFileSync, watchFile, unwatchFile } from 'node:fs';
+import { readFileSync, statSync, watchFile, unwatchFile } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 
 type State = Map<string, unknown>;
@@ -31,18 +31,26 @@ function merge(base: unknown, local: unknown, disk: unknown): unknown {
 }
 
 export function synchronizeGlobalState(
-  store: Store, write: (state: State) => void, notify: (keys: string[]) => void,
+  store: Store, write: (state: State) => void | Promise<void>, notify: (keys: string[]) => void,
 ): () => void {
   let baseline = structuredClone(Object.fromEntries(store.state));
   let lastText = '';
-  function refresh(): boolean {
+  let lastVersion: string | null = null;
+  function refresh(forceRead = false): boolean {
     let text: string, disk: Record<string, unknown>;
     try {
+      const file = statSync(store.filePath, { bigint: true });
+      const version = [file.dev, file.ino, file.size, file.mtimeNs, file.ctimeNs].join(':');
+      if (!forceRead && version === lastVersion) return true;
       text = readFileSync(store.filePath, 'utf8');
-      if (text === lastText) return true;
+      if (text === lastText) { lastVersion = version; return true; }
+      lastVersion = null;
       disk = JSON.parse(text);
       if (!record(disk)) return false;
-    } catch { return false; } // Atomic replacement or incomplete external write: retry next tick.
+      lastVersion = version;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' && lastText === '';
+    }
     const local = Object.fromEntries(store.state);
     const next = merge(baseline, local, disk) as Record<string, unknown>;
     const changed = [...new Set([...Object.keys(local), ...Object.keys(next)])]
@@ -59,11 +67,13 @@ export function synchronizeGlobalState(
   }
   // Refresh and serialize together; do not enqueue an already stale snapshot.
   store.queueGlobalStatePersistence = () => {
-    store.persistQueued = store.persistQueued.catch(() => undefined).then(() => {
-      if (!refresh()) throw new Error(`Cannot save global state while the Desktop state file is unreadable: ${store.filePath}`);
-      write(store.state);
-      baseline = structuredClone(Object.fromEntries(store.state));
+    store.persistQueued = store.persistQueued.catch(() => undefined).then(async () => {
+      if (!refresh(true)) throw new Error(`Cannot save global state while the Desktop state file is unreadable: ${store.filePath}`);
+      const snapshot = structuredClone(Object.fromEntries(store.state));
+      await write(new Map(Object.entries(snapshot)));
+      baseline = snapshot;
       lastText = JSON.stringify(baseline);
+      lastVersion = null;
     });
   };
   store.flushWith = () => {
@@ -74,6 +84,7 @@ export function synchronizeGlobalState(
     return store.persistQueued;
   };
   refresh();
-  watchFile(store.filePath, { interval: 1000, persistent: false }, refresh);
-  return () => unwatchFile(store.filePath, refresh);
+  const changed = () => { refresh(); };
+  watchFile(store.filePath, { interval: 1000, persistent: false }, changed);
+  return () => unwatchFile(store.filePath, changed);
 }

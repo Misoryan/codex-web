@@ -18,6 +18,7 @@
     "build:browser": "vite build --config vite.browser.config.ts",
     "build:server": "cd src/server && tsc",
     "build:lite": "node scripts/build-lite.mjs",
+    "build:release": "node scripts/build-static-release.mjs",
     "prepare:asar": "node scripts/prepare-desktop.mjs",
     "server": "node src/server/main.js",
     "setup": "node scripts/prepare-desktop.mjs",
@@ -31,6 +32,7 @@
   "author": "martin <martincharles07@gmail.com>",
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.3",
     "@electron/asar": "^4.2.0",
     "@fastify/multipart": "^10.0.0",
     "@fastify/static": "^9.1.1",

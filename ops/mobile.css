@@ -39,6 +39,29 @@
 }
 
 @media (max-width: 768px) {
+  /* The native sidebar button and plugin toolbar share the mobile top row. */
+  [data-browser-mcp-header] {
+    position: fixed;
+    inset: env(safe-area-inset-top, 0px) 0 auto 44px;
+    z-index: 54;
+    height: 46px;
+    min-width: 0;
+    background: var(--color-surface);
+  }
+
+  body:has([data-browser-mcp-header]) [data-app-shell-titlebar] {
+    inset-inline-start: 0 !important;
+    inset-inline-end: auto !important;
+    width: 44px;
+    height: 46px;
+    background: var(--color-surface) !important;
+  }
+
+  body:has([data-browser-mcp-header]) [class*="ApplicationMenuTopBar"]:has([data-app-shell-sidebar-trigger]) {
+    height: 46px;
+    background: var(--color-surface) !important;
+  }
+
   html[data-theme="dark"] [data-app-shell-titlebar] {
     background-color: var(--color-surface);
   }
@@ -314,7 +337,29 @@
   }
 
   [data-app-navigation-rail] {
-    display: none !important;
+    position: fixed;
+    inset: 44px auto env(safe-area-inset-bottom, 0px) 0;
+    z-index: 54;
+    width: 56px !important;
+    display: flex !important;
+    background: var(--color-surface);
+    border-inline-end: 1px solid var(--color-border);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  [data-app-shell-sidebar-open="false"] [data-app-navigation-rail] {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  [data-app-navigation-rail] :is(button, a) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  [data-app-shell-frame]:has([data-app-navigation-rail]) #app-shell-sidebar {
+    padding-inline-start: 56px;
   }
 
   [data-codex-mobile-account-footer] {
@@ -553,7 +598,7 @@
     inset-block-start: 0;
   }
 
-  [data-app-shell-frame]:has([data-app-shell-sidebar-trigger][aria-expanded="false"]):not(:has(#settings-search)) .app-shell-left-panel {
+  [data-app-shell-frame][data-app-shell-sidebar-open="false"]:not(:has(#settings-search)) .app-shell-left-panel {
     width: 0 !important;
     visibility: hidden;
     pointer-events: none;
@@ -564,7 +609,7 @@
     border-inline-end: 1px solid var(--color-border);
   }
 
-  [data-app-shell-frame]:has([data-app-shell-sidebar-trigger][aria-expanded="true"]) [class*="_MainContentClip_"] {
+  [data-app-shell-frame][data-app-shell-sidebar-open="true"] [class*="_MainContentClip_"] {
     opacity: 0.45;
   }
 
@@ -621,148 +666,189 @@
     color: var(--color-text);
   }
 
-  /* Settings navigation uses one horizontal row above the full-width page. */
-  [data-app-shell-frame]:has(#settings-search) [class*="ApplicationMenuTopBar"] {
-    display: none;
+}
+
+[data-codex-settings-toolbar] {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  /* The native category list and detail page share one mobile viewport. */
+  [data-app-shell-frame]:has([data-codex-settings-view]) {
+    --app-shell-titlebar-height: 0px !important;
+    --app-shell-application-menu-height: 0px !important;
   }
 
-  [data-app-shell-workspace-row]:has(#settings-search) {
+  [data-app-shell-frame]:has([data-codex-settings-view]) [class*="ApplicationMenuTopBar"],
+  .app-shell-left-panel:has([data-codex-settings-view]) [data-codex-mobile-account-footer] {
+    display: none !important;
+  }
+
+  [data-app-shell-workspace-row]:has([data-codex-settings-view]) {
     flex-direction: column;
   }
 
-  [data-app-shell-frame]:has(#settings-search) [data-app-navigation-rail] {
-    display: none;
-  }
-
-  .app-shell-left-panel:has(#settings-search) {
+  .app-shell-left-panel:has([data-codex-settings-view]) {
     position: relative !important;
     inset: auto;
     width: 100% !important;
-    height: 120px;
+    margin-top: 0 !important;
+    height: calc(52px + env(safe-area-inset-top, 0px));
     flex: 0 0 auto;
-    border-inline-end: 0;
+    border: 0;
     border-bottom: 1px solid var(--color-border);
   }
 
-  .app-shell-left-panel:has(#settings-search) > div,
-  .app-shell-left-panel:has(#settings-search) > div > div {
+  .app-shell-left-panel:has([data-codex-settings-view="list"]) {
+    height: auto;
+    flex: 1 1 0;
+  }
+
+  .app-shell-left-panel:has([data-codex-settings-view]) > div,
+  .app-shell-left-panel:has([data-codex-settings-view]) > div > div {
     width: 100% !important;
     min-width: 0 !important;
   }
 
-  #app-shell-sidebar:has(#settings-search) {
-    padding-top: 0;
+  #app-shell-sidebar:has([data-codex-settings-view]),
+  #app-shell-sidebar:has([data-codex-settings-view]) [data-slate-sidebar-content] {
+    padding: 0;
+  }
+
+  [data-codex-settings-view] {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  [data-codex-settings-toolbar] {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 12px;
+    min-height: calc(52px + env(safe-area-inset-top, 0px));
+    padding: env(safe-area-inset-top, 0px) 12px 0;
+  }
+
+  [data-codex-settings-back] {
+    min-height: 44px;
+    width: auto;
+    touch-action: manipulation;
+  }
+
+  [data-codex-settings-back] .text-fade-truncate {
+    mask-image: none;
+  }
+
+  [data-codex-settings-navigation] {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  [data-codex-settings-view="detail"] [data-codex-settings-navigation],
+  [data-app-shell-workspace-row]:has([data-codex-settings-view="list"]) > :last-child {
+    display: none;
   }
 
   nav.sidebar-navigation:has(#settings-search) {
     overflow: hidden;
-    margin-bottom: 0;
+    margin: 0;
   }
 
   nav.sidebar-navigation:has(#settings-search) > div > :first-child {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
+    padding: 0 16px 12px;
   }
 
-  [data-codex-settings-back] {
-    width: 44px;
-    height: 44px;
-    flex: 0 0 auto;
-    margin: 0;
-    padding: 0 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  nav.sidebar-navigation:has(#settings-search) > div > :first-child > :last-child {
-    flex: 1;
-    min-width: 0;
+  nav.sidebar-navigation:has(#settings-search) > div > :first-child > :first-child:has(+ div #settings-search) {
+    display: none;
   }
 
   #settings-search {
     font-size: 16px;
-  }
-
-  nav.sidebar-navigation:has(#settings-search) > div > .overflow-y-auto {
-    flex-direction: row;
-    align-items: center;
-    overflow-x: auto;
-    overflow-y: hidden;
-    gap: 4px;
-    padding: 0 12px 8px;
-    touch-action: pan-x;
-  }
-
-  nav.sidebar-navigation:has(#settings-search) .group\/nav-section,
-  nav.sidebar-navigation:has(#settings-search) .group\/nav-list {
-    display: contents;
-  }
-
-  nav.sidebar-navigation:has(#settings-search) .group\/nav-section-title {
-    display: none;
-  }
-
-  [data-settings-panel-slug] {
-    width: max-content !important;
-    flex: 0 0 auto;
     min-height: 44px;
-    padding-inline: 14px;
-    border-radius: 10px;
-    touch-action: pan-x;
   }
 
-  [data-settings-panel-slug] .icon-leading-slot {
-    display: none;
-  }
-
-  [data-settings-panel-slug] .text-fade-truncate {
-    mask-image: none;
-    overflow: visible;
-    white-space: nowrap;
-  }
-
-  [data-settings-panel-slug][aria-current="page"] {
-    background: var(--color-text);
-    color: var(--color-surface);
-  }
-
-  [data-settings-panel-slug][aria-current="page"] > div {
-    color: inherit;
-  }
-
-  [data-app-shell-workspace-row]:has(#settings-search) > :last-child {
-    min-height: 0;
-    width: 100%;
-    flex: 1 1 0;
-  }
-
-  [data-app-shell-workspace-row]:has(#settings-search) .flex-1.scrollbar-stable.overflow-y-auto {
-    padding: 16px 16px 32px;
+  nav.sidebar-navigation:has(#settings-search) .overflow-y-auto {
+    padding: 0 16px max(16px, env(safe-area-inset-bottom, 0px));
     overscroll-behavior-y: contain;
     touch-action: pan-y;
   }
 
-  [data-app-shell-workspace-row]:has(#settings-search) .draggable:empty {
+  nav.sidebar-navigation:has(#settings-search) .sidebar-item {
+    min-height: 44px;
+    touch-action: pan-y;
+  }
+
+  [data-app-shell-workspace-row]:has([data-codex-settings-view]) > :last-child {
+    min-height: 0;
+    width: 100%;
+    flex: 1 1 0;
+    padding-top: 0 !important;
+  }
+
+  [data-app-shell-workspace-row]:has([data-codex-settings-view]) [data-app-shell-main-surface] {
+    border-radius: 0 !important;
+  }
+
+  [data-app-shell-workspace-row]:has([data-codex-settings-view]) .flex-1.scrollbar-stable.overflow-y-auto {
+    padding: 0 0 max(16px, env(safe-area-inset-bottom, 0px));
+    overscroll-behavior-y: contain;
+    touch-action: pan-y;
+  }
+
+  [data-app-shell-workspace-row]:has([data-codex-settings-view]) .draggable:empty {
     display: none;
   }
 
-  .group\/settings .justify-between.px-4 {
-    flex-wrap: wrap;
+  .group\/settings [class~="@container/settings-row"] {
     gap: 12px;
-    padding-block: 16px;
+    align-items: flex-start;
   }
 
-  .group\/settings .justify-between.px-4 > :first-child {
-    flex: 1 1 180px;
+  .group\/settings [class~="@container/settings-row"] > :last-child {
     min-width: 0;
+    max-width: 50%;
   }
 
-  .group\/settings .gap-10 {
-    gap: 24px;
+  .group\/settings [class~="@container/settings-row"]:has(button:not([role="switch"]), input:not([type="checkbox"]), select, textarea) {
+    flex-wrap: wrap;
+  }
+
+  .group\/settings [class~="@container/settings-row"]:has(button:not([role="switch"]), input:not([type="checkbox"]), select, textarea) > :first-child {
+    flex: 1 1 100%;
+  }
+
+  .group\/settings [class~="@container/settings-row"]:has(button:not([role="switch"]), input:not([type="checkbox"]), select, textarea) > :last-child {
+    max-width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .group\/settings button:not([role="switch"]),
+  .group\/settings input:not([type="checkbox"], [type="radio"], [type="color"], [type="range"], [type="hidden"], [type="file"]),
+  .group\/settings select {
+    min-height: 44px;
+    max-width: 100%;
+  }
+
+  .group\/settings input:not([type="checkbox"], [type="radio"], [type="color"], [type="range"], [type="hidden"], [type="file"]),
+  .group\/settings select,
+  .group\/settings textarea {
+    font-size: 16px;
+  }
+
+  .group\/settings .rounded-full:has(> button + input[type="text"]) {
+    width: 128px;
+    height: auto;
+    min-height: 46px;
+  }
+
+  .group\/settings .rounded-full:has(> input[type="text"]) > button {
+    min-height: 0;
   }
 }
 @media (max-width: 768px) {

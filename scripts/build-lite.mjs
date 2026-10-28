@@ -1,3 +1,4 @@
+import {withStartupPreloads} from '../ops/startup-preloads.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {transform} from 'esbuild';
@@ -54,6 +55,7 @@ let html=await fs.readFile(path.join(root,'index.html'),'utf8');
 html=html.replace('<base href="/" />','<base href="/lite/" />').replaceAll('"/assets/','"/lite/assets/').replace('href="/manifest.json"','href="/lite/manifest.webmanifest"');
 html=html.replace('</head>',`<link rel="modulepreload" href="/lite/assets/${primary}"><script defer src="/lite/desktop-lite.js"></script></head>`);
 html=withPwaHead(html);
+html=await withStartupPreloads(html,dest,'/lite/');
 html=await withStartupAssets(html,root,'/lite/',dest);
 await fs.writeFile(path.join(dest,'index.html'),html);
 await fs.copyFile('ops/desktop-lite.js',path.join(dest,'desktop-lite.js'));
