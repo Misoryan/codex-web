@@ -6,7 +6,11 @@ const code = `
 const assert = require('node:assert/strict');
 let delivered;
 global.__codexElectronIpcBridge = {sendToRenderer(id, message) { delivered = message; }};
-const {BrowserWindow} = require(${JSON.stringify(modulePath)});
+const {app, BrowserWindow} = require(${JSON.stringify(modulePath)});
+// Pinned macOS startup binds setIcon before invoking it with a null image.
+Reflect.apply(app.dock.setIcon.bind(app.dock), app.dock, [null]);
+app.dock.setMenu(null);
+app.dock.downloadFinished('fixture-download');
 const window = new BrowserWindow({});
 const payload = {type: 'test-notification', text: 'bridge-payload-marker'};
 window.webContents.send('test-channel', payload);
