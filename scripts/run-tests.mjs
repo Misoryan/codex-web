@@ -6,6 +6,7 @@ const tests = process.argv.includes('--desktop') ? [
   'test-log-storage.cjs',
   'test-service-tier.cjs',
   'test-native-rpc-subscriptions.cjs',
+  'test-follower-queue-sync.cjs',
   'test-code-review-performance.cjs',
   'test-code-review-ui.cjs',
   'test-code-review-merge-readiness.cjs',
