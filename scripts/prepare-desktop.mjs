@@ -10,6 +10,7 @@ import {extractAll} from '@electron/asar';
 import sharp from 'sharp';
 import {patchAutomationSchedulerFile} from './automation-scheduler-patch.mjs';
 import {patchNativeRpcSubscriptionFile} from './native-rpc-subscription-patch.mjs';
+import {patchNativeFollowerQueueFile} from './follower-queue-sync-patch.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 process.chdir(root);
@@ -107,4 +108,5 @@ await fs.rm('scratch/asar/node_modules/better-sqlite3', {recursive: true});
 for (const file of ['scripts/app-tools-patch.cjs', 'scripts/bundle-browser-runtime.cjs', 'scripts/patch-webview.mjs', 'scripts/patch-native-history.mjs']) run(process.execPath, [file]);
 await patchAutomationSchedulerFile();
 await patchNativeRpcSubscriptionFile();
+await patchNativeFollowerQueueFile();
 console.log(`Prepared Codex Desktop ${desktop.version}`);

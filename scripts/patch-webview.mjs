@@ -26,6 +26,7 @@ import {patchSub2ApiUsage,patchSub2ApiTrigger} from './sub2api-ui-patch.mjs';
 import {patchSubagentInheritance} from './subagent-inheritance-patch.mjs';
 import {patchActivityEntrypoint,patchActivityProjectIcon,patchPickedImageMime,patchMobileNewTabs,patchMobileHistoryNavigation,patchSidebarPagination} from './mobile-native-patch.mjs';
 import {patchFollowupSubmission,patchInactiveSteer} from './followup-delivery-patch.mjs';
+import {patchFollowerQueueSync} from './follower-queue-sync-patch.mjs';
 import {patchIdleThreadOwnership} from './thread-ownership-patch.mjs';
 import {patchBrowserAppInfo} from './browser-app-info-patch.mjs';
 import {patchLatestHistoryTail} from './history-tail-patch.mjs';
@@ -39,7 +40,7 @@ import {patchMcpAppFrames,patchMcpAppHandshake,patchMcpAppSurface,patchMcpAppWor
 export async function patchWebview(root='scratch/asar/webview/assets'){
  const entries=[
  ['app-initial-6350d04672d0.js',[patchCodeReviewGitHubScope,patchMcpAppWorkspace,patchServiceTier,patchImagePreviewInitial,patchBrowserAttachments,patchBrowserUploads,patchUngroupedPinned,patchSubagentInheritance,patchSub2ApiTrigger,patchActivityEntrypoint,patchActivityProjectIcon,patchMobileNewTabs,patchMobileHistoryNavigation,patchSidebarPagination,patchAsyncQuestionSync,patchActivityFreshnessInitial,patchUnreadCatalogState,s=>s.replace('return sp(lm.theme) ?? `system`;','return `system`;')]],
- ['app-shared-8bd9d0399038.js',[patchSubagentHistory,patchAgentTitleMetadata,patchSidebarStatus,patchDraftPersistence,patchNativeOpen,patchBrowserFonts,patchBrowserView,patchIdleThreadOwnership,patchBrowserAppInfo,patchInactiveSteer,patchLatestHistoryTail,patchActivityFreshnessShared,patchActivityQuestionAnswers,patchAsyncQuestionGroups,patchConversationOpening,patchUnarchive,s=>s.includes('k3 as codexWebConversationField')?s:s+'\nexport {k3 as codexWebConversationField};\n']],
+ ['app-shared-8bd9d0399038.js',[patchSubagentHistory,patchAgentTitleMetadata,patchSidebarStatus,patchDraftPersistence,patchNativeOpen,patchBrowserFonts,patchBrowserView,patchIdleThreadOwnership,patchBrowserAppInfo,patchInactiveSteer,patchFollowerQueueSync,patchLatestHistoryTail,patchActivityFreshnessShared,patchActivityQuestionAnswers,patchAsyncQuestionGroups,patchConversationOpening,patchUnarchive,s=>s.includes('k3 as codexWebConversationField')?s:s+'\nexport {k3 as codexWebConversationField};\n']],
  ['app-primary-6f60e9ac4103.js',[patchAgentTitleRows,patchDraftSubmission,patchContextUsageButton,patchBrowserAttachmentCapability,patchPickedImageMime,patchFollowupSubmission]],
  ['profile-dropdown-items-d842ad78cd70.js',[patchSub2ApiUsage]],
  ['general-settings-65e65871cdcd.js',[patchFontMenu]],

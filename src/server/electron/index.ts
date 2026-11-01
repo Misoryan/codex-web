@@ -297,6 +297,18 @@ const appBase = {
   ...createEmitterStub("app"),
   name: "Codex",
   isPackaged: false,
+  // The web host has no native Dock, but macOS startup binds these methods.
+  dock: {
+    setIcon(image: unknown): void {
+      log("app.dock.setIcon", [image]);
+    },
+    setMenu(menu: unknown): void {
+      log("app.dock.setMenu", [menu]);
+    },
+    downloadFinished(filePath: string): void {
+      log("app.dock.downloadFinished", [filePath]);
+    },
+  },
   getName(): string {
     log("app.getName", []);
     return "Codex";
