@@ -1,5 +1,20 @@
 import { randomUUID } from "node:crypto";
-type Transport = { send: (frame: unknown) => void; close: () => void };
+// Send the retained JSON directly: large history replies must not be parsed and
+// serialized again on every delivery or replay.
+type Transport = { send: (data: string) => void; close: () => void };
+export function rendererSessionLimits(env: Record<string, string | undefined> = {}) {
+  const mib = (name: string, fallback: number) => {
+    const value = env[name] === undefined ? fallback : Number(env[name]);
+    if (!Number.isInteger(value) || value < 1 || value > 4096)
+      throw Error(`${name} must be an integer from 1 to 4096 MiB`);
+    return value * 1024 * 1024;
+  };
+  const sessionBytes = mib("CODEX_WEB_RENDERER_SESSION_MIB", 128);
+  const totalBytes = mib("CODEX_WEB_RENDERER_TOTAL_MIB", 512);
+  if (totalBytes < sessionBytes)
+    throw Error("CODEX_WEB_RENDERER_TOTAL_MIB must be at least CODEX_WEB_RENDERER_SESSION_MIB");
+  return { graceMs: 2 * 60 * 60_000, sessionBytes, totalBytes, sessions: 64 };
+}
 // Only fixed protocol labels may enter diagnostics; never channels, IDs or data.
 const eventKinds = new Set(["fetch-response", "worker-response", "worker-main-rpc-response", "mcp-response", "persisted-atom-sync", "persisted-atom-updated", "lite-persisted-state-delta", "global-state-updated", "shared-object-updated"]);
 export function rendererEventCategory(payload: unknown): string {
@@ -37,12 +52,7 @@ export class RendererSessions<W> {
   constructor(
     private create: () => Promise<W>,
     private destroy: (window: W) => void,
-    private limits = {
-      graceMs: 2 * 60 * 60_000,
-      sessionBytes: 32 * 1024 * 1024,
-      totalBytes: 256 * 1024 * 1024,
-      sessions: 64,
-    },
+    private limits = rendererSessionLimits(),
     private observe?: (event: string, id: string, document: string, fields: Record<string, string | number | boolean>) => void,
   ) {}
   private discard(id: string, entry: Entry<W>, reason: string) {
@@ -54,7 +64,7 @@ export class RendererSessions<W> {
     this.bytes -= entry.bytes;
     entry.events.clear();
     entry.bytes = 0;
-    entry.transport?.send({ type: "renderer-reset", reason });
+    entry.transport?.send(JSON.stringify({ type: "renderer-reset", reason }));
     entry.transport?.close();
     entry.transport = undefined;
     void entry.window.then(this.destroy).catch(() => {});
@@ -164,7 +174,7 @@ export class RendererSessions<W> {
       const size = Buffer.byteLength(data);
       const category = rendererEventCategory(payload);
       if (current.bytes + size > this.limits.sessionBytes || size > this.limits.totalBytes) {
-        this.observe?.("overflow", id, current.document, { category, incomingBytes: size, bufferedBytes: current.bytes, limitBytes: this.limits.sessionBytes });
+        this.observe?.("overflow", id, current.document, { category, incomingBytes: size, bufferedBytes: current.bytes, limitBytes: this.limits.sessionBytes, detached: !current.transport });
         this.discard(id, current, "当前页面未确认的数据已达上限");
         return;
       }
@@ -180,7 +190,7 @@ export class RendererSessions<W> {
       current.bytes += size;
       this.bytes += size;
       if (current.bytes >= 1024 * 1024 && Date.now() - current.profiledAt >= 60_000) this.profile(id, current, "pressure");
-      current.transport?.send(JSON.parse(data));
+      current.transport?.send(data);
     };
     return {
       window: current.window,
@@ -193,14 +203,14 @@ export class RendererSessions<W> {
         this.observe?.("replay", id, document, { events: current.events.size, bufferedBytes: current.bytes, head: current.head, ack: current.ack });
         this.profile(id, current, "replay");
         current.transport = transport;
-        transport.send({
+        transport.send(JSON.stringify({
           type: "renderer-ready",
           epoch: current.epoch,
           clientAck: current.clientAck,
-        });
+        }));
         for (const { data } of current.events.values())
-          transport.send(JSON.parse(data));
-        transport.send({ type: "renderer-caught-up", head: current.head });
+          transport.send(data);
+        transport.send(JSON.stringify({ type: "renderer-caught-up", head: current.head }));
       },
       accept: (seq: number, dispatch: () => void) => {
         if (!isCurrent()) return;
@@ -215,10 +225,10 @@ export class RendererSessions<W> {
           current.clientAck = seq;
           dispatch();
         }
-        transport.send({
+        transport.send(JSON.stringify({
           type: "renderer-command-ack",
           seq: current.clientAck,
-        });
+        }));
       },
       release: () => {
         if (!isCurrent() || current.timer) return;

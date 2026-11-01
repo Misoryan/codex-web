@@ -49,7 +49,8 @@ async function main() {
     assert.match(await (await fetch(origin + '/lite/')).text(), /lite monitoring fixture/);
     assert.equal((await fetch(origin + '/assets/missing.js?token=' + secret)).status, 404);
     assert.equal((await fetch(origin + '/__backend/upload', {method: 'POST', body: secret})).status, 400);
-    assert.equal((await fetch(origin + '/__backend/health')).status, 200);
+    const health = await (await fetch(origin + '/__backend/health')).json();
+    assert.deepEqual(health.rendererBufferLimits, {sessionBytes: 128 * 1024 * 1024, totalBytes: 512 * 1024 * 1024});
     assert.equal((await fetch(origin + '/__backend/telemetry', {method: 'POST', headers: {'content-type': 'application/json'}, body: secret})).status, 400);
     const visit = randomUUID();
     assert.equal((await fetch(origin + '/__backend/telemetry', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({event: 'ready', visit, durationMs: 123, mode: 'lite', standalone: true, message: secret})})).status, 204);

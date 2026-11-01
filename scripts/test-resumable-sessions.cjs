@@ -17,7 +17,7 @@ m._compile(
   ).outputText,
   __filename,
 );
-const { RendererSessions } = m.exports;
+const { RendererSessions, rendererSessionLimits } = m.exports;
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 function setup(limits) {
   let created = 0,
@@ -44,7 +44,7 @@ function attach(s, id = "tab", doc = "document", epoch = null, ack = 0) {
     epoch,
     ack,
     {},
-    { send: (f) => frames.push(f), close: () => closed++ },
+    { send: (data) => frames.push(JSON.parse(data)), close: () => closed++ },
   );
   return {
     lease,
@@ -58,6 +58,38 @@ function attach(s, id = "tab", doc = "document", epoch = null, ack = 0) {
     },
   };
 }
+test("renderer budgets support long replies and reject invalid deployment settings", () => {
+  const defaults = rendererSessionLimits();
+  assert.equal(defaults.sessionBytes, 128 * 1024 * 1024);
+  assert.equal(defaults.totalBytes, 512 * 1024 * 1024);
+  const configured = rendererSessionLimits({CODEX_WEB_RENDERER_SESSION_MIB: '256', CODEX_WEB_RENDERER_TOTAL_MIB: '1024'});
+  assert.equal(configured.sessionBytes, 256 * 1024 * 1024);
+  assert.equal(configured.totalBytes, 1024 * 1024 * 1024);
+  for (const name of ['CODEX_WEB_RENDERER_SESSION_MIB', 'CODEX_WEB_RENDERER_TOTAL_MIB']) {
+    for (const value of ['', '0', '-1', '1.5', 'NaN', 'Infinity', '4097'])
+      assert.throws(() => rendererSessionLimits({[name]: value}), /integer/);
+  }
+  assert.throws(() => rendererSessionLimits({CODEX_WEB_RENDERER_SESSION_MIB: '256', CODEX_WEB_RENDERER_TOTAL_MIB: '128'}), /at least/);
+});
+test("a reply above the old 32 MiB limit retains identical JSON through delivery and replay", () => {
+  const t = setup(), live = [], replay = [];
+  const a = t.sessions.attach('large', 'document', null, 0, {}, {send: data => live.push(data), close() {}});
+  a.ready();
+  const epoch = JSON.parse(live[0]).epoch;
+  const payload = {type: 'message-port-message', data: '历史🙂'.repeat(4 * 1024 * 1024)};
+  a.send(payload);
+  assert(a.isCurrent(), 'A single large response must not expire an otherwise empty page');
+  const retained = live.at(-1);
+  assert(Buffer.byteLength(retained) > 32 * 1024 * 1024);
+  payload.data = 'mutated after delivery';
+  a.release();
+  const b = t.sessions.attach('large', 'document', epoch, 0, {}, {send: data => replay.push(data), close() {}});
+  b.ready();
+  assert.equal(replay[1], retained, 'Replay uses the original serialized snapshot');
+  b.acknowledge(1);
+  assert.equal(t.sessions.bytes, 0, 'Large replies release their full budget after acknowledgement');
+  b.expire('done');
+});
 test("lost acknowledgement: native mutation executes exactly once; lost output replays in order", async () => {
   const t = setup(),
     a = attach(t.sessions);

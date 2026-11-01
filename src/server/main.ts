@@ -20,7 +20,7 @@ import { installModuleAliasHook } from "./module";
 import { hideBackgroundProcessWindows } from "./background-processes";
 import { createBrowserStreamUpgrade } from "./browser-stream";
 import { synchronizeGlobalState } from "./global-state-sync";
-import { RendererSessions } from "./renderer-sessions";
+import { RendererSessions, rendererSessionLimits } from "./renderer-sessions";
 import { StatsigCache } from "./statsig-cache";
 import { PersistedStateEncoder } from "../shared/persisted-state-wire";
 import { registerSub2ApiUsage } from "./sub2api-usage";
@@ -426,6 +426,7 @@ function ensureElectronLikeProcessContext(): void {
 }
 
 export async function createBridgeServer(logDirectory = path.resolve(__dirname, "../../runtime/monitoring")) {
+  const rendererLimits = rendererSessionLimits(process.env);
   const bridgeState = getIpcMainBridgeState();
   bridgeState.synchronizeGlobalState = (store, write) => {
     synchronizeGlobalState(store, write, keys => bridgeState.onGlobalStateChanged?.(keys));
@@ -446,7 +447,8 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     const storage = await fs.statfs(process.cwd());
     return { ok: true, runId: monitoring.runId, droppedLogRecords: destination.droppedRecords,
       consoleDroppedLogRecords: processLogging?.droppedRecords ?? 0,
-      availableDiskBytes: storage.bavail * storage.bsize };
+      availableDiskBytes: storage.bavail * storage.bsize,
+      rendererBufferLimits: { sessionBytes: rendererLimits.sessionBytes, totalBytes: rendererLimits.totalBytes } };
   });
   app.post("/__backend/telemetry", {
     bodyLimit: 4096,
@@ -583,7 +585,7 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     rendererChannels.delete(view.window.webContents.id);
     for (const port of [...view.ports.values()]) port.disconnect();
     view.window.destroy();
-  }, undefined, (event, id, document, fields) => monitoring.event(`session.${event}`, { session: identity(id), document: identity(document), ...fields }));
+  }, rendererLimits, (event, id, document, fields) => monitoring.event(`session.${event}`, { session: identity(id), document: identity(document), ...fields }));
   const statsigCache = new StatsigCache();
   websocketServer.on("connection", (socket, request) => {
     const trace = monitoring.connection("ipc", socket, request);
@@ -608,7 +610,7 @@ export async function createBridgeServer(logDirectory = path.resolve(__dirname, 
     let lease: ReturnType<typeof rendererSessions.attach>;
     try {
       lease=rendererSessions.attach(sessionId,documentId,params.get("epoch"),Number(params.get("ack")||0),socket,
-        {send:sendFrame,close:()=>socket.close(4001,"Renderer connection replaced")});
+        {send:data=>{if(socket.readyState===WebSocket.OPEN)socket.send(data);},close:()=>socket.close(4001,"Renderer connection replaced")});
     } catch(error) { statsig?.close(); reset(String(error));return; }
     trace.event("attached", { reused: lease.reused });
     let alive=true;
