@@ -39,7 +39,8 @@ wss.on('connection', (socket, request) => {
   const params = new URL(request.url, 'http://fixture').searchParams;
   const send = frame => {if (loseCommandAck && frame.type === 'renderer-command-ack') return; if (socket.readyState === 1) socket.send(JSON.stringify(frame));};
   const lease = sessions.attach(params.get('session'), params.get('document'), params.get('epoch'), Number(params.get('ack')), socket, {
-    send: frame => {
+    send: data => {
+      const frame = JSON.parse(data);
       if (replay && ['renderer-event', 'renderer-caught-up'].includes(frame.type)) replayFrames.push(() => send(frame));
       else send(frame);
     }, close: () => socket.close(4001, 'Replaced'),

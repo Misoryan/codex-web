@@ -22,7 +22,7 @@ const tests = process.argv.includes('--desktop') ? [
 ] : [
   'test-native-thread-retention.mjs',
   'test-global-state-sync.cjs', 'test-statsig-cache.cjs', 'test-feature-config.cjs', 'test-resumable-sessions.cjs', 'test-sub2api-capacity.cjs',
-  'test-usage-cost-api.cjs', 'test-sub2api-loading.cjs', 'test-electron-logging.cjs', 'test-public-connection.cjs',
+  'test-usage-cost-api.cjs', 'test-sub2api-loading.cjs', 'test-electron-logging.cjs', 'test-public-connection.cjs', 'test-large-renderer-events.cjs',
   'test-browser-guest.cjs', 'test-monitoring.cjs', 'test-mcp-app-sandbox.cjs',
   'test-profile-identity.cjs', 'test-local-profile.cjs',
 ];

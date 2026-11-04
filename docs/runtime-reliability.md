@@ -3,6 +3,21 @@
 The backend isolates failures at the operation that owns them. It does not
 install a process-wide exception handler that treats arbitrary failures as safe.
 
+## Long conversation transport
+
+Renderer sessions retain up to 128 MiB of unacknowledged serialized events per
+document and 512 MiB across documents by default. A single native history reply
+can exceed the previous 32 MiB budget even when there is no acknowledgement
+backlog. Deployment overrides and their memory implications are documented in
+[configuration](configuration.md#长会话与页面恢复缓存); health reports the effective budgets.
+
+The transport sends the retained JSON directly on initial delivery and replay,
+avoiding a full JSON parse and second serialization for large responses. Event
+ordering, cumulative acknowledgements, immutable replay and command deduplication
+are unchanged. Budgets still apply while disconnected; exceeding them resets the
+document explicitly. This does not make indefinitely offline pages recoverable
+or reduce the native application's full snapshot size.
+
 ## Native subscriptions
 
 `native-rpc-subscription-patch.mjs` closes a native notification subscription when
