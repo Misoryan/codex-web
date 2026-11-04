@@ -6,6 +6,7 @@ const tests = process.argv.includes('--desktop') ? [
   'test-activity-history.cjs', 'test-async-question-sync.cjs', 'test-chat-loading.cjs',
   'test-history-tail.cjs', 'test-pwa-resource-loading.cjs', 'test-pwa-style-update.cjs',
 ] : [
+  'test-machine-api.mjs',
   'test-statsig-cache.cjs', 'test-resumable-sessions.cjs', 'test-sub2api-capacity.cjs',
   'test-usage-cost-api.cjs', 'test-electron-logging.cjs', 'test-public-connection.cjs',
   'test-browser-guest.cjs', 'test-monitoring.cjs', 'test-workflow-runtime.cjs', 'test-workflow-lifecycle.cjs', 'test-workflow-publication.cjs', 'test-workflow-activity.cjs',
